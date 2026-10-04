@@ -10,8 +10,20 @@ from .refresh import diff_profile
 AVAILABILITY = {"available", "not_available", "blocked", "not_applicable", "ambiguous", "failed"}
 
 
+def _stringify_keys(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _stringify_keys(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_stringify_keys(item) for item in value]
+    return value
+
+
+def _dumps(value: Any, **kwargs) -> str:
+    return json.dumps(_stringify_keys(value), ensure_ascii=False, sort_keys=True, default=str, **kwargs)
+
+
 def _stable(prefix: str, value: Any) -> str:
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode()
+    encoded = _dumps(value, separators=(",", ":")).encode()
     return f"{prefix}-{hashlib.sha256(encoded).hexdigest()[:16]}"
 
 
@@ -22,7 +34,6 @@ def availability(status: Any) -> str:
             "failed": "failed", "ambiguous": "ambiguous"}.get(str(status), "failed")
 
 
-# Public descriptive aliases for callers that prefer contract terminology.
 map_availability = availability
 
 
@@ -34,7 +45,7 @@ def _span(record: dict[str, Any]) -> str | None:
         return None
     if isinstance(value, str):
         return value[:1000]
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)[:1000]
+    return _dumps(value)[:1000]
 
 
 def profile_to_contract(profile: dict[str, Any], *, run_id: str = "", started_at: str | None = None,
@@ -58,10 +69,6 @@ def profile_to_contract(profile: dict[str, Any], *, run_id: str = "", started_at
         evidence_ids[field] = ev_id
         state = availability(record.get("status"))
         claim_value = record.get("value")
-        # A registry-linked domain is a discovery lead, not proof that a page
-        # belongs to the legal entity.  Keep the captured evidence auditable,
-        # but do not expose its text, social links, or brand as company facts
-        # unless the shared website identity gate accepted it.
         if field == "website" and state == "available":
             assessment = (record.get("value") or {}).get("identity_assessment") or {}
             if assessment and not assessment.get("publishable"):
@@ -78,9 +85,6 @@ def profile_to_contract(profile: dict[str, Any], *, run_id: str = "", started_at
         claim = {"field": field, "value": claim_value, "availability": state,
                  "confidence": confidence, "evidence_ids": [ev_id]}
         claims.append(claim)
-    # A deterministic synthesis is deliberately small and only uses values
-    # already accepted by the registry/company-site identity gates.  It is a
-    # claim so every sentence remains traceable to evidence IDs.
     registry = (profile.get("evidence") or {}).get("registry_live") or (profile.get("evidence") or {}).get("registry") or {}
     registry_value = registry.get("value") or {}
     website = (profile.get("evidence") or {}).get("website") or {}

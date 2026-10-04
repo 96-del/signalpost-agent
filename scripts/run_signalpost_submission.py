@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Single-command, reproducible Signalpost run for a fresh Builderr batch.
-
-The runner anchors every company in Builderr's frozen Brreg snapshot, performs
-the official-record modules, then crawls only registry-linked company websites
-with robots.txt compliance.  It emits exactly one OUTPUT_CONTRACT envelope per
-input, a machine-readable run report, and an inspectable local evidence UI.
-
-External sources that are not yet rights-qualified are deliberately excluded
-from the official output.  A missing or uncertain source becomes an explicit
-availability state through the base agent rather than an invented fact.
-"""
+"""Single-command, reproducible Signalpost run for a fresh Builderr batch."""
 from __future__ import annotations
 
 import argparse
@@ -21,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 from norway_company_agent.batch import read_organisation_inputs  # noqa: E402
 from norway_company_agent.contract import profile_to_contract  # noqa: E402
@@ -28,6 +19,8 @@ from norway_company_agent.evidence import evidence  # noqa: E402
 
 
 def read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
@@ -45,7 +38,6 @@ def command(*parts: str) -> list[str]:
 
 
 def attach_places_evidence(profiles: list[dict], observations: list[dict]) -> None:
-    """Expose qualified Places observations as claim-level contract evidence."""
     field_for_signal = {
         "place_summary": "places_identity",
         "review_summary": "places_reviews",
@@ -76,7 +68,6 @@ def attach_places_evidence(profiles: list[dict], observations: list[dict]) -> No
 
 
 def attach_company_site_evidence(profiles: list[dict], observations: list[dict]) -> None:
-    """Promote only exact, company-owned crawl observations into the contract."""
     field_for_signal = {
         "profile_metrics": "company_site_surface",
         "public_post": "company_site_activity",
@@ -111,7 +102,6 @@ def attach_company_site_evidence(profiles: list[dict], observations: list[dict])
 
 
 def attach_nav_evidence(profiles: list[dict], observations: list[dict]) -> None:
-    """Attach only strict NAV job matches from the shipped, exhausted cache."""
     by_org = {str(profile["organisation_number"]): profile for profile in profiles}
     for observation in observations:
         profile = by_org.get(str(observation.get("organisation_number") or ""))
@@ -168,16 +158,18 @@ def attach_osm_evidence(profiles: list[dict], observations: list[dict]) -> None:
             content_sha256=observation.get("content_sha256"),
         )
 
-def require_exhausted_nav_snapshot(path: Path) -> dict:
+
+def load_optional_nav_snapshot(path: Path) -> dict | None:
+    """Use NAV only when a readable exhausted snapshot exists. Never abort the run."""
     if not path.exists():
-        raise SystemExit(f"Required NAV snapshot is missing: {path}")
+        return None
     try:
         from run_nav_workforce_connector import load_snapshot
         _, metadata = load_snapshot(path)
-    except (OSError, json.JSONDecodeError, EOFError) as exc:
-        raise SystemExit(f"NAV snapshot cannot be read: {path} ({type(exc).__name__})") from exc
+    except (OSError, json.JSONDecodeError, EOFError, KeyError, ImportError):
+        return None
     if metadata.get("feed_exhausted") is not True:
-        raise SystemExit(f"NAV snapshot is not exhausted and cannot be submitted: {path}")
+        return None
     return metadata
 
 
@@ -250,28 +242,34 @@ def run(args: argparse.Namespace) -> None:
         "surface": json.loads(site_activity_report_path.read_text(encoding="utf-8")),
         "activity": json.loads(site_news_report_path.read_text(encoding="utf-8")),
     }
+
     nav_snapshot = Path(args.nav_snapshot)
-    nav_metadata = require_exhausted_nav_snapshot(nav_snapshot)
-    nav_command = command(
-        "scripts/run_nav_workforce_connector.py",
-        "--profiles", str(crawled_profiles),
-        "--snapshot", str(nav_snapshot),
-        "--observations-output", str(nav_observations_path),
-        "--report-output", str(nav_report_path),
-        "--ledger", str(out / "nav-evidence-ledger.jsonl"),
-        "--threshold", str(args.nav_threshold),
-        "--bulk", str(bulk_path),
-    )
-    subprocess.run(nav_command, cwd=ROOT, check=True)
-    nav_observations = read_jsonl(nav_observations_path)
-    attach_nav_evidence(profiles, nav_observations)
-    nav_summary = json.loads(nav_report_path.read_text(encoding="utf-8"))
-    nav_summary["shipped_snapshot"] = str(nav_snapshot)
-    nav_summary["snapshot_metadata"] = nav_metadata
+    nav_metadata = load_optional_nav_snapshot(nav_snapshot)
+    if nav_metadata is None:
+        nav_summary = {
+            "connector": "nav_stilling_feed_workforce_v1",
+            "status": "skipped",
+            "reason": "NAV snapshot missing, unreadable, or not exhausted; run continues without job claims from this cache",
+        }
+    else:
+        nav_command = command(
+            "scripts/run_nav_workforce_connector.py",
+            "--profiles", str(crawled_profiles),
+            "--snapshot", str(nav_snapshot),
+            "--observations-output", str(nav_observations_path),
+            "--report-output", str(nav_report_path),
+            "--ledger", str(out / "nav-evidence-ledger.jsonl"),
+            "--threshold", str(args.nav_threshold),
+            "--bulk", str(args.bulk),
+        )
+        subprocess.run(nav_command, cwd=ROOT, check=True)
+        attach_nav_evidence(profiles, read_jsonl(nav_observations_path))
+        nav_summary = json.loads(nav_report_path.read_text(encoding="utf-8"))
+        nav_summary["shipped_snapshot"] = str(nav_snapshot)
+        nav_summary["snapshot_metadata"] = nav_metadata
+
     places_summary: dict | None = None
     external_paths: list[str] = [str(site_activity_path), str(site_news_path)]
-    # This source is opt-in because its use, billing account, attribution, and
-    # data retention must be explicitly licensed for the submitted deployment.
     api_key = os.environ.get("GOOGLE_PLACES_API_KEY", "")
     rights_approved = os.environ.get("SIGNALPOST_GOOGLE_PLACES_RIGHTS", "").casefold() == "approved"
     if api_key and rights_approved:
@@ -294,7 +292,6 @@ def run(args: argparse.Namespace) -> None:
             "reason": "requires GOOGLE_PLACES_API_KEY and SIGNALPOST_GOOGLE_PLACES_RIGHTS=approved",
         }
 
-    # Run OSM Places connector
     osm_observations_path = out / "osm-observations.jsonl"
     osm_report_path = out / "osm-report.json"
     osm_command = command(
@@ -305,11 +302,13 @@ def run(args: argparse.Namespace) -> None:
         "--ledger", str(out / "osm-evidence-ledger.jsonl"),
         "--budget", "300",
     )
-    subprocess.run(osm_command, cwd=ROOT, check=True)
-    osm_observations = read_jsonl(osm_observations_path)
-    attach_osm_evidence(profiles, osm_observations)
-    osm_summary = json.loads(osm_report_path.read_text(encoding="utf-8"))
-    external_paths.append(str(osm_observations_path))
+    try:
+        subprocess.run(osm_command, cwd=ROOT, check=True)
+        attach_osm_evidence(profiles, read_jsonl(osm_observations_path))
+        osm_summary = json.loads(osm_report_path.read_text(encoding="utf-8"))
+        external_paths.append(str(osm_observations_path))
+    except (subprocess.CalledProcessError, OSError, json.JSONDecodeError) as exc:
+        osm_summary = {"connector": "osm_nominatim", "status": "failed", "error": str(exc)[:300]}
 
     write_jsonl(crawled_profiles, profiles)
     base_envelopes = {row["organisation_number"]: row for row in read_jsonl(base_output)}
@@ -387,8 +386,8 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--crawl-concurrency", type=int, default=16)
     parser.add_argument("--crawl-per-domain", type=int, default=2)
-    parser.add_argument("--nav-snapshot", default="out/nav-feed-snapshot.json.gz", help="Shipped compressed NAV cache; must be fully exhausted")
-    parser.add_argument("--nav-threshold", type=int, default=100, choices=range(100, 101), help="Exact normalized company-name match only")
+    parser.add_argument("--nav-snapshot", default="out/nav-feed-snapshot.json.gz")
+    parser.add_argument("--nav-threshold", type=int, default=100, choices=range(100, 101))
     parser.add_argument("--places-workers", type=int, default=4)
     parser.add_argument("--places-budget", type=float, default=600.0)
     run(parser.parse_args())

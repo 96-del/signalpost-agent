@@ -1,9 +1,4 @@
-"""Small SQLite persistence layer for resumable company research state.
-
-The store deliberately keeps the source profile and evidence as JSON.  This
-preserves the existing profile API while giving callers atomic checkpoints and
-an auditable run/operation ledger.
-"""
+"""Small SQLite persistence layer for resumable company research state."""
 from __future__ import annotations
 
 import json
@@ -12,8 +7,16 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+def _stringify_keys(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _stringify_keys(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_stringify_keys(item) for item in value]
+    return value
+
+
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(_stringify_keys(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
 
 class SQLiteStateStore:
@@ -81,7 +84,6 @@ class SQLiteStateStore:
                     (f"{org}:{field}", org, field, _json(record)),
                 )
 
-    # Common spelling used by checkpoint callers.
     checkpoint_profile = save_profile
 
     def load_profile(self, organisation_number: str) -> dict[str, Any] | None:
