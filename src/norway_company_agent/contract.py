@@ -57,8 +57,25 @@ def profile_to_contract(profile: dict[str, Any], *, run_id: str = "", started_at
              "claim_span": _span(record)})
         evidence_ids[field] = ev_id
         state = availability(record.get("status"))
+        claim_value = record.get("value")
+        # A registry-linked domain is a discovery lead, not proof that a page
+        # belongs to the legal entity.  Keep the captured evidence auditable,
+        # but do not expose its text, social links, or brand as company facts
+        # unless the shared website identity gate accepted it.
+        if field == "website" and state == "available":
+            assessment = (record.get("value") or {}).get("identity_assessment") or {}
+            if assessment and not assessment.get("publishable"):
+                state = "ambiguous"
+                claim_value = {
+                    "candidate_url": record.get("source_url"),
+                    "identity_status": assessment.get("status"),
+                    "identity_method": assessment.get("method"),
+                    "note": "Registry-linked website captured but not attributed to this legal entity.",
+                }
         confidence = 0.0 if state in {"failed", "not_available", "blocked", "not_applicable"} else 1.0
-        claim = {"field": field, "value": record.get("value"), "availability": state,
+        if state == "ambiguous":
+            confidence = 0.0
+        claim = {"field": field, "value": claim_value, "availability": state,
                  "confidence": confidence, "evidence_ids": [ev_id]}
         claims.append(claim)
     # A deterministic synthesis is deliberately small and only uses values

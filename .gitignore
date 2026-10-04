@@ -1,22 +1,7 @@
-﻿# Large datasets and downloads
-brreg-enheter.csv
-*.csv
-data/*.gz
-data/*.jsonl.gz
-*.gz
-
-# Local databases and runtime state
-*.db
-*.sqlite
-out/*.db
-out/*.jsonl
-smoke-companies.jsonl
-entry-companies.jsonl
-
-# Python and virtual environments
-venv/
-.venv/
+﻿.venv/
 __pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
+*.pyc
+brreg-enheter.csv
+nav-feed-snapshot.json
+nav-feed-snapshot.json.gz
+*.csv

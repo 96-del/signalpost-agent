@@ -81,6 +81,49 @@ The published archive was clean-room verified on August 24, 2026: 104 tests and 
 
 Increase `--count` and `--expected-count` together for a larger local test. The 100-row smoke test above is practice only; Builderr supplies the companies for every official run.
 
+## One-command evaluation candidate
+
+The submission runner keeps the official-record path and the robots-aware,
+registry-linked website crawl in the same reproducible invocation. It writes
+one contract envelope per input, a run report, and an inspectable static
+evidence browser. Install the crawler extra once, then use the same command
+shape for a Builderr-supplied fresh batch (replace the paths and count only):
+
+```bash
+uv sync --extra crawler
+uv run python scripts/run_signalpost_submission.py \
+  --organisations smoke-companies.jsonl \
+  --bulk brreg-enheter.csv \
+  --output out/submission-envelopes.jsonl \
+  --report out/submission-report.json \
+  --viewer out/submission-viewer.html \
+  --run-id smoke-submission-001 \
+  --expected-count 100
+```
+
+This runner does not publish third-party platform data until its source-rights
+and exact-entity gates are qualified. A local score is a diagnostic only; it
+is not an official Builderr score or a qualification claim.
+
+The runner also requires the shipped `out/nav-feed-snapshot.json.gz` cache to
+declare `feed_exhausted: true`; it fails closed on a partial cache. The cache
+is matched only at an exact normalized employer-name score and municipality,
+then a job claim retains its NAV URL, retrieval time, and snapshot hash. Keep
+that snapshot in the submitted commit alongside the command above.
+
+For broader, permitted external recall, it can optionally call **Google Places
+API (New)**. This requires an evaluator-provided `GOOGLE_PLACES_API_KEY` and a
+deployment-specific confirmation that the applicable Places API licence,
+attribution, billing, and retention terms allow the intended use:
+
+```bash
+export GOOGLE_PLACES_API_KEY='server-side-key'
+export SIGNALPOST_GOOGLE_PLACES_RIGHTS=approved
+```
+
+Without both variables, the runner does not contact Google and reports the
+connector as `not_run`; it never turns the absence of that source into zero.
+
 ## The improvement loop
 
 1. Treat the organisation number as the anchor.

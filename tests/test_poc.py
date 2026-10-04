@@ -36,6 +36,7 @@ from scripts.run_brave_discovery import brave_search  # noqa: E402
 from scripts.run_annual_report_workforce_connector import extract_candidate, needs_ocr  # noqa: E402
 from scripts.normalize_google_maps_results import candidate_score  # noqa: E402
 from scripts.run_scrapy_websites import terminal_events_for_run  # noqa: E402
+from scripts.run_signalpost_submission import attach_company_site_evidence, attach_nav_evidence  # noqa: E402
 from scripts.run_sentiment_model import MODEL_REVISION, normalize_generated_label  # noqa: E402
 from scripts.score_company_completeness import score_rows, summarize  # noqa: E402
 from scripts.extract_company_site_activity import observation as site_activity_observation  # noqa: E402
@@ -1197,6 +1198,59 @@ class PrototypeTests(unittest.TestCase):
         website = compact_prototype(row)["web"]["value"]
         self.assertEqual(website["quarantined_social_count"], 1)
         self.assertEqual(website["social_links"], [])
+
+    def test_places_layer_requires_approved_licensed_exact_observation(self):
+        row = {
+            "organisation_number": "923609016", "name": "Example AS", "legal_form": "AS",
+            "municipality": "OSLO", "employees": None, "industry_code": None,
+            "industry_label": None, "website": "", "bankrupt": False, "liquidating": False,
+            "evidence": {},
+        }
+        unsafe = {
+            "organisation_number": "923609016", "platform": "google_places", "signal_type": "place_summary",
+            "exact_entity": True, "rights_status": "review_required", "acquisition_mode": "unofficial_api_experiment",
+            "metrics": {"title": "Wrongly eligible"},
+        }
+        approved = {
+            "organisation_number": "923609016", "platform": "google_places", "signal_type": "place_summary",
+            "exact_entity": True, "rights_status": "approved", "acquisition_mode": "licensed_api",
+            "metrics": {"title": "Example AS", "address": "Oslo"}, "source_url": "https://maps.example/place",
+        }
+        self.assertFalse(compact_prototype(row, [unsafe])["external"]["places"]["available"])
+        places = compact_prototype(row, [unsafe, approved])["external"]["places"]
+        self.assertTrue(places["available"])
+        self.assertEqual(places["place"]["title"], "Example AS")
+
+    def test_submission_promotes_only_safe_company_site_activity(self):
+        profiles = [{"organisation_number": "923609016", "evidence": {}}]
+        safe = {
+            "organisation_number": "923609016", "platform": "company_site", "signal_type": "public_post",
+            "source_url": "https://example.test/news/launch", "retrieved_at": "2026-10-04T00:00:00Z",
+            "content_sha256": "a" * 64, "exact_entity": True, "rights_status": "approved",
+            "acquisition_mode": "permitted_public_page", "identity_proof": [{"type": "website_identity_gate"}],
+            "evidence_span": "Product launch", "metrics": {"captured_news_pages": 1}, "strategy": "company_site_activity",
+        }
+        unsafe = {**safe, "rights_status": "review_required", "signal_type": "profile_metrics"}
+        attach_company_site_evidence(profiles, [unsafe, safe])
+        activity = profiles[0]["evidence"].get("company_site_activity")
+        self.assertIsNotNone(activity)
+        self.assertEqual(activity["value"]["evidence_span"], "Product launch")
+        self.assertNotIn("company_site_surface", profiles[0]["evidence"])
+
+    def test_submission_requires_exact_nav_name_match(self):
+        profiles = [{"organisation_number": "923609016", "evidence": {}}]
+        base = {
+            "organisation_number": "923609016", "platform": "job_board", "signal_type": "job_posting",
+            "source_url": "https://arbeidsplassen.nav.no/stillinger/stilling/example",
+            "retrieved_at": "2026-10-04T00:00:00Z", "content_sha256": "b" * 64,
+            "exact_entity": True, "rights_status": "approved", "acquisition_mode": "official_api",
+            "identity_proof": [{"value": {"match_score": 99.9}}], "metrics": {"active_job_count": 1},
+            "evidence_span": "Engineer", "strategy": "jobs_feed_discovery",
+        }
+        attach_nav_evidence(profiles, [base])
+        self.assertNotIn("workforce_jobs", profiles[0]["evidence"])
+        attach_nav_evidence(profiles, [{**base, "identity_proof": [{"value": {"match_score": 100}}]}])
+        self.assertEqual(profiles[0]["evidence"]["workforce_jobs"]["value"]["active_job_count"], 1)
 
 
 class RefreshTests(unittest.TestCase):

@@ -192,7 +192,13 @@ def fetch_official_modules(org: str, modules: set[str], fetcher: Callable[[str],
     for module, (url, source_type) in endpoints.items():
         if module not in modules:
             continue
-        result = _fetch_history(url) if module == "financial_history" and fetcher is fetch_json else fetcher(url)
+        try:
+            result = _fetch_history(url) if module == "financial_history" and fetcher is fetch_json else fetcher(url)
+        except Exception as exc:
+            # Fault isolation is mandatory for the evaluator contract: a
+            # transient source failure for one module/company must become an
+            # explicit terminal evidence record, not abort every other input.
+            result = FetchResult(url, 0, 0, 0, error=f"{type(exc).__name__}: {str(exc)[:180]}")
         metrics.append(result)
         normalized = None
         if result.status == 200:
