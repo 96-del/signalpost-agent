@@ -1,5 +1,8 @@
 from __future__ import annotations
-
+from norway_company_agent.sampling import deterministic_extension_sample, deterministic_financial_filer_sample, deterministic_website_audit_sample, financial_filer_eligible, iter_bulk, normalize_row, stratum  # noqa: E402
+from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
+from norway_company_agent.contract import profile_to_contract  # noqa: E402
+import subprocess
 import json
 import gzip
 import csv
@@ -8,6 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -1385,5 +1389,152 @@ class VerifiedSiteSeedTests(unittest.TestCase):
             self.assertIn("unknown organisations", failed.stderr)
 
 
+class OverflowCsvTests(unittest.TestCase):
+    def test_overflow_none_key_still_emits_100_envelopes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.csv.gz"
+            with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+                handle.write("organisasjonsnummer;navn;organisasjonsform.kode\n")
+                for index in range(100):
+                    org = f"{100000000 + index}"
+                    line = f"{org};Company {index} AS;AS"
+                    if index == 7:
+                        line += ";OVERFLOW;EXTRA"
+                    handle.write(line + "\n")
+            records = list(iter_bulk(path))
+            self.assertEqual(len(records), 100)
+            self.assertTrue(all(None not in (record.get("raw") or {}) for record in records))
+            orgs = [record["organisation_number"] for record in records]
+            profiles, _ = profiles_from_bulk(path, orgs)
+            self.assertEqual(len(profiles), 100)
+            envelopes = [profile_to_contract(profile, run_id="overflow-test") for profile in profiles]
+            self.assertEqual(len(envelopes), 100)
+            for envelope in envelopes:
+                json.dumps(envelope, sort_keys=True)
+                raw = next((claim["value"] for claim in envelope["claims"] if claim["field"] == "registry"), {}) or {}
+                if isinstance(raw, dict):
+                    self.assertNotIn(None, raw)
+
+
+class StableEvidenceIdTests(unittest.TestCase):
+    def test_ids_ignore_retrieval_time(self):
+        def make_profile(retrieved_at):
+            return {
+                "organisation_number": "100000001",
+                "evidence": {
+                    "registry": {
+                        "status": "available",
+                        "source_url": "https://x",
+                        "retrieved_at": retrieved_at,
+                        "content_sha256": "abc",
+                        "value": {
+                            "navn": "A AS",
+                        },
+                    }
+                },
+            }
+
+        first = profile_to_contract(
+            make_profile("2026-10-05T16:00:00Z")
+        )
+
+        second = profile_to_contract(
+            make_profile("2026-10-05T17:00:00Z")
+        )
+
+        self.assertEqual(
+            [e["id"] for e in first["evidence"]],
+            [e["id"] for e in second["evidence"]],
+        )
+
+        self.assertNotEqual(
+            first["evidence"][0]["retrieved_at"],
+            second["evidence"][0]["retrieved_at"],
+        )
+
+class OverflowRunnerEndToEndTests(unittest.TestCase):
+    def test_submitted_runner_emits_100_with_overflow_row(self):
+        root = Path(__file__).resolve().parents[1]
+
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            bulk = d / "registry.csv.gz"
+
+            with gzip.open(bulk, "wt", encoding="utf-8", newline="") as handle:
+                handle.write(
+                    "organisasjonsnummer;navn;organisasjonsform.kode\n"
+                )
+
+                for i in range(100):
+                    line = f"{100000000 + i};Company {i} AS;AS"
+
+                    if i == 7:
+                        line += ";OVERFLOW;EXTRA"
+
+                    handle.write(line + "\n")
+
+            orgs = [f"{100000000 + i}" for i in range(100)]
+
+            batch = d / "batch.jsonl"
+            batch.write_text(
+                "".join(
+                    json.dumps({"organisation_number": o}) + "\n"
+                    for o in orgs
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(root / "scripts/run_competition_batch.py"),
+                    "--organisations",
+                    str(batch),
+                    "--bulk",
+                    str(bulk),
+                    "--profiles-output",
+                    str(d / "p.jsonl"),
+                    "--output",
+                    str(d / "e.jsonl"),
+                    "--report",
+                    str(d / "r.json"),
+                    "--run-id",
+                    "overflow-e2e",
+                    "--expected-count",
+                    "100",
+                    "--modules",
+                    "registry,accounting_obligation",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(
+                result.returncode,
+                0,
+                result.stderr[-2000:],
+            )
+
+            rows = [
+                json.loads(line)
+                for line in (d / "e.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line.strip()
+            ]
+
+            self.assertEqual(
+                [r["organisation_number"] for r in rows],
+                orgs,
+            )
+
+            for row in rows:
+                json.dumps(row, sort_keys=True)
+
+            report = json.loads(
+                (d / "r.json").read_text(encoding="utf-8")
+            )
+
+            self.assertTrue(report["validation"]["passed"])
 if __name__ == "__main__":
     unittest.main()

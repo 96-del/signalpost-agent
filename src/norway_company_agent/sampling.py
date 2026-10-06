@@ -18,8 +18,18 @@ def _first(row: dict[str, str], *names: str) -> str:
             return value
     return ""
 
+def sanitize_csv_row(row: dict | None) -> dict[str, Any]:
+    """Drop DictReader overflow cells stored under a None key."""
+    cleaned: dict[str, Any] = {}
+    for key, value in (row or {}).items():
+        if key is None:
+            continue
+        cleaned[str(key)] = value
+    return cleaned
+
 
 def normalize_row(row: dict[str, str]) -> dict[str, Any]:
+    row = sanitize_csv_row(row)
     org = _first(row, "organisasjonsnummer", "Organisasjonsnummer")
     employees_raw = _first(row, "antallAnsatte", "Antall ansatte")
     try:
