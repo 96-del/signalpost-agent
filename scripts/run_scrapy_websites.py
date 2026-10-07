@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from norway_company_agent.crawl_events import merge_profile_events, missing_seed_error_events  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
 from norway_company_agent.operations import domain_request_summary, latency_summary, peak_rss_bytes  # noqa: E402
+from norway_company_agent.website import normalize_homepage  # noqa: E402
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -30,6 +31,48 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
     temporary.replace(path)
 
+
+
+
+def crawl_input_fingerprint(
+    rows: list[dict],
+    selected_numbers: set[str] | None,
+    limit: int | None,
+) -> str:
+    """Fingerprint only the stable fields that determine website crawl targets."""
+    targets = [
+        row
+        for row in rows
+        if row.get("website")
+        and (
+            selected_numbers is None
+            or row.get("organisation_number") in selected_numbers
+        )
+    ][: limit if limit else None]
+
+    payload = {
+        "schema": "signalpost-crawl-input-v1",
+        "targets": [
+            {
+                "organisation_number": str(
+                    row.get("organisation_number") or ""
+                ),
+                "website": normalize_homepage(
+                    str(row.get("website") or "").strip()
+                ),
+            }
+            for row in targets
+        ],
+    }
+
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    return hashlib.sha256(encoded).hexdigest()
 
 def terminal_events_for_run(profiles: list[dict], events: list[dict], crawl_complete: bool) -> list[dict]:
     return missing_seed_error_events(profiles, events) if crawl_complete else []
@@ -58,13 +101,59 @@ def main() -> None:
 
     input_path = Path(args.input)
     input_hash = hashlib.sha256(input_path.read_bytes()).hexdigest()
+
+    rows = read_jsonl(input_path)
+
+    selected_numbers = set(args.organisation_numbers or []) or None
+
+    crawl_targets = [
+        row
+        for row in rows
+        if row.get("website")
+        and (
+            selected_numbers is None
+            or row.get("organisation_number") in selected_numbers
+        )
+    ][: args.limit if args.limit else None]
+
+    crawl_input_hash = crawl_input_fingerprint(
+        rows,
+        selected_numbers,
+        args.limit,
+    )
+
     jobdir = Path(args.jobdir)
     jobdir.mkdir(parents=True, exist_ok=True)
+
     metadata_path = jobdir / "signalpost-input.json"
-    metadata = {"input_sha256": input_hash, "input_path": str(input_path.resolve())}
-    if metadata_path.exists() and json.loads(metadata_path.read_text(encoding="utf-8")) != metadata:
-        raise SystemExit("Job directory belongs to a different input. Choose a new --jobdir.")
-    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+    metadata = {
+        "schema": "signalpost-crawl-input-v1",
+        "crawl_input_sha256": crawl_input_hash,
+        "input_path": str(input_path.resolve()),
+    }
+
+    if metadata_path.exists():
+        existing_metadata = json.loads(
+            metadata_path.read_text(
+                encoding="utf-8"
+            )
+        )
+
+        if existing_metadata != metadata:
+            raise SystemExit(
+                "Job directory belongs to a different crawl input. "
+                "Choose a new --jobdir."
+            )
+
+    metadata_path.write_text(
+        json.dumps(
+            metadata,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     events_path = Path(args.events)
     events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,7 +168,6 @@ def main() -> None:
     })
     process = CrawlerProcess(settings)
     crawler = process.create_crawler(SignalpostWebsiteSpider)
-    selected_numbers = set(args.organisation_numbers or []) or None
     process.crawl(
         crawler,
         profiles_path=str(input_path),
@@ -94,11 +182,6 @@ def main() -> None:
     stats = crawler.stats.get_stats()
     crawl_complete = stats.get("finish_reason") == "finished"
 
-    rows = read_jsonl(input_path)
-    crawl_targets = [
-        row for row in rows
-        if row.get("website") and (selected_numbers is None or row["organisation_number"] in selected_numbers)
-    ][: args.limit if args.limit else None]
     events = read_jsonl(events_path) if events_path.exists() else []
     missing_seed_events = terminal_events_for_run(crawl_targets, events, crawl_complete)
     if missing_seed_events:
