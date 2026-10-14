@@ -254,10 +254,33 @@ def profile_to_contract(
         unknown = []
 
         financials = profile_evidence.get("financials") or {}
+        financial_history = profile_evidence.get("financial_history") or {}
+        website_evidence = profile_evidence.get("website") or {}
 
         if financials.get("status") != "available":
             unknown.append(
                 "No verified annual-account record was returned in this run."
+            )
+        if financial_history.get("status") != "available":
+            unknown.append(
+                "No verified filing-year history was returned in this run."
+            )
+        if (website_evidence.get("status") or "not_available") not in {"available"}:
+            unknown.append(
+                "No verified company website was attributed to this legal entity in this run."
+            )
+        if "workforce_jobs" not in profile_evidence:
+            unknown.append(
+                "No exact-company job posting was verified in this run."
+            )
+        if "places_identity" not in profile_evidence:
+            unknown.append(
+                "No exact-company place record was verified in this run."
+            )
+        if not unknown:
+            unknown.append(
+                "All tracked official families returned a record in this run; "
+                "external jobs and place coverage remain opportunity-dependent."
             )
 
         synthesis = {
@@ -289,6 +312,7 @@ def profile_to_contract(
                 "website",
                 "financials",
             }
+            and (profile_evidence.get(key) or {}).get("status") == "available"
         ]
 
         claims.append(

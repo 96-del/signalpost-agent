@@ -206,6 +206,7 @@ def run(args: argparse.Namespace) -> None:
         "--run-id", args.run_id,
         "--expected-count", str(args.expected_count),
         "--workers", str(args.workers),
+        "--modules", args.modules,
     )
     subprocess.run(base, cwd=ROOT, check=True)
 
@@ -387,6 +388,7 @@ def main() -> None:
     parser.add_argument("--crawl-concurrency", type=int, default=16)
     parser.add_argument("--crawl-per-domain", type=int, default=2)
     parser.add_argument("--nav-snapshot", default="out/nav-feed-snapshot.json.gz")
+    parser.add_argument("--modules", default="registry,accounting_obligation,registry_live,financials,financial_history,roles,group,locations,website")
     parser.add_argument("--nav-threshold", type=int, default=100, choices=range(100, 101))
     parser.add_argument("--places-workers", type=int, default=4)
     parser.add_argument("--places-budget", type=float, default=600.0)
