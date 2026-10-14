@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from .refresh import diff_profile
@@ -18,27 +21,61 @@ AVAILABILITY = {
 }
 
 
-def _stringify_keys(value: Any) -> Any:
-    """Convert dictionary keys to strings while removing None keys."""
+def _json_safe(value: Any) -> Any:
+    """Return a recursive, strict-JSON-safe representation of ``value``.
+
+    Evaluator output must survive arbitrary source payloads. In particular,
+    ``sort_keys=True`` cannot compare mixed key types and JSON's permissive
+    NaN/Infinity tokens are not valid strict JSON.
+    """
     if isinstance(value, dict):
         return {
-            str(k): _stringify_keys(v)
+            str(k): _json_safe(v)
             for k, v in value.items()
             if k is not None
         }
 
     if isinstance(value, (list, tuple)):
-        return [_stringify_keys(item) for item in value]
+        return [_json_safe(item) for item in value]
 
-    return value
+    if isinstance(value, (set, frozenset)):
+        items = [_json_safe(item) for item in value]
+        return sorted(
+            items,
+            key=lambda item: json.dumps(
+                item,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ),
+        )
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+
+    if isinstance(value, Path):
+        return str(value)
+
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+
+    return str(value)
 
 
 def _dumps(value: Any, **kwargs) -> str:
     """Serialize values deterministically as JSON."""
     return json.dumps(
-        _stringify_keys(value),
+        _json_safe(value),
         ensure_ascii=False,
         sort_keys=True,
+        allow_nan=False,
         default=str,
         **kwargs,
     )
@@ -352,7 +389,7 @@ def profile_to_contract(
             if key in operations:
                 op[key] = operations[key]
 
-    return {
+    return _json_safe({
         "organisation_number": str(
             profile.get("organisation_number") or ""
         ),
@@ -367,7 +404,7 @@ def profile_to_contract(
         "changes": changes,
         "errors": list(errors or []),
         "operations": op,
-    }
+    })
 
 
 to_output_contract = profile_to_contract

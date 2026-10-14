@@ -86,11 +86,12 @@ Increase `--count` and `--expected-count` together for a larger local test. The 
 The submission runner keeps the official-record path and the robots-aware,
 registry-linked website crawl in the same reproducible invocation. It writes
 one contract envelope per input, a run report, and an inspectable static
-evidence browser. Install the crawler extra once, then use the same command
+evidence browser. It works with the default locked install; the optional
+Scrapy crawler is used automatically only when installed. Use the same command
 shape for a Builderr-supplied fresh batch (replace the paths and count only):
 
 ```bash
-uv sync --extra crawler
+uv sync --locked
 uv run python scripts/run_signalpost_submission.py \
   --organisations smoke-companies.jsonl \
   --bulk brreg-enheter.csv \
@@ -117,6 +118,11 @@ is absent, unreadable, or partial, the runner records NAV as skipped and still
 returns the required result for every supplied company. It never publishes a
 NAV job claim unless the cache is exhausted and the employer identity matches
 exactly.
+
+The OSM connector is also opt-in (`--enable-osm`) because its public 1 Hz
+service can consume a material share of a fixed evaluator time budget. Its
+absence is reported as `not_run`; it never prevents an envelope from being
+returned.
 
 For broader, permitted external recall, it can optionally call **Google Places
 API (New)**. This requires an evaluator-provided `GOOGLE_PLACES_API_KEY` and a
@@ -155,7 +161,8 @@ Read `docs/competition-control-loop.md`, `docs/external-connectors.md` and the p
 Submit a repository with:
 
 - a 100-company smoke-test result or report;
-- one documented command that accepts a JSONL batch of organisation numbers;
+- one documented command that accepts the evaluator-supplied CSV, JSONL, or
+  text batch of organisation numbers;
 - exactly one terminal envelope per input;
 - pinned dependencies and reproducible setup;
 - a previous-snapshot input and material-change output;

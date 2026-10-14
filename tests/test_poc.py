@@ -6,10 +6,12 @@ import subprocess
 import json
 import gzip
 import csv
+import math
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -1452,6 +1454,31 @@ class StableEvidenceIdTests(unittest.TestCase):
             second["evidence"][0]["retrieved_at"],
         )
 
+    def test_contract_recursively_emits_strict_json(self):
+        profile = {
+            "organisation_number": "100000001",
+            "evidence": {
+                "registry": {
+                    "status": "available",
+                    "source_url": "https://registry.example/100000001",
+                    "retrieved_at": datetime(2026, 10, 14, tzinfo=timezone.utc),
+                    "content_sha256": "a" * 64,
+                    "value": {
+                        2025: {None: "discarded", "values": {"a", "b"}},
+                        "nan": math.nan,
+                        "infinity": math.inf,
+                        "path": Path("cache/source.json"),
+                    },
+                }
+            },
+        }
+
+        envelope = profile_to_contract(profile, run_id="strict-json")
+        encoded = json.dumps(envelope, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        self.assertIn('"2025"', encoded)
+        self.assertNotIn("NaN", encoded)
+        self.assertNotIn("Infinity", encoded)
+
 class OverflowRunnerEndToEndTests(unittest.TestCase):
     def test_submitted_runner_accepts_evaluator_plain_csv_inputs(self):
         root = Path(__file__).resolve().parents[1]
@@ -1461,12 +1488,12 @@ class OverflowRunnerEndToEndTests(unittest.TestCase):
             bulk = d / "registry.csv"
 
             with bulk.open("w", encoding="utf-8", newline="") as handle:
-                handle.write(
-                    "organisasjonsnummer;navn;organisasjonsform.kode\n"
-                )
+                handle.write("\ufefforganisasjonsnummer;navn;organisasjonsform.kode\n")
 
                 for i in range(100):
-                    line = f"{100000000 + i};Company {i} AS;AS"
+                    org = f"{100000000 + i}"
+                    formatted = f"{org[:3]} {org[3:6]} {org[6:]}"
+                    line = f'"{formatted}";Company {i} AS;AS'
 
                     if i == 7:
                         line += ";OVERFLOW;EXTRA"
@@ -1477,8 +1504,11 @@ class OverflowRunnerEndToEndTests(unittest.TestCase):
 
             batch = d / "batch.csv"
             batch.write_text(
-                "organisation_number,evaluation_split,sample_slice\n"
-                + "".join(f"{o},held_out,stress\n" for o in orgs),
+                "\ufefforganisasjonsnummer;evaluation_split;sample_slice\n"
+                + "".join(
+                    f'"{o[:3]} {o[3:6]} {o[6:]}";held_out;stress\n'
+                    for o in orgs
+                ),
                 encoding="utf-8",
             )
 

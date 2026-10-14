@@ -30,7 +30,13 @@ def sanitize_csv_row(row: dict | None) -> dict[str, Any]:
 
 def normalize_row(row: dict[str, str]) -> dict[str, Any]:
     row = sanitize_csv_row(row)
-    org = _first(row, "organisasjonsnummer", "Organisasjonsnummer")
+    org = "".join(
+        character
+        for character in _first(
+            row, "organisasjonsnummer", "Organisasjonsnummer"
+        )
+        if character.isdigit()
+    )
     employees_raw = _first(row, "antallAnsatte", "Antall ansatte")
     try:
         employees = int(employees_raw) if employees_raw else None

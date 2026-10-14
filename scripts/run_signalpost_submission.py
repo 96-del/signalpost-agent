@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import subprocess
@@ -35,6 +36,11 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
 
 def command(*parts: str) -> list[str]:
     return [sys.executable, *parts]
+
+
+def crawler_runtime_available() -> bool:
+    """Scrapy is an optional enhancement, never a prerequisite to score."""
+    return importlib.util.find_spec("scrapy") is not None
 
 
 def attach_places_evidence(profiles: list[dict], observations: list[dict]) -> None:
@@ -210,17 +216,40 @@ def run(args: argparse.Namespace) -> None:
     )
     subprocess.run(base, cwd=ROOT, check=True)
 
-    crawl = command(
-        "scripts/run_scrapy_websites.py",
-        "--input", str(base_profiles),
-        "--output", str(crawled_profiles),
-        "--events", str(crawl_events),
-        "--jobdir", str(crawler_jobdir),
-        "--report", str(crawl_report),
-        "--concurrency", str(args.crawl_concurrency),
-        "--per-domain", str(args.crawl_per_domain),
-    )
-    subprocess.run(crawl, cwd=ROOT, check=True)
+    if crawler_runtime_available():
+        crawl = command(
+            "scripts/run_scrapy_websites.py",
+            "--input", str(base_profiles),
+            "--output", str(crawled_profiles),
+            "--events", str(crawl_events),
+            "--jobdir", str(crawler_jobdir),
+            "--report", str(crawl_report),
+            "--concurrency", str(args.crawl_concurrency),
+            "--per-domain", str(args.crawl_per_domain),
+        )
+        subprocess.run(crawl, cwd=ROOT, check=True)
+    else:
+        # run_competition_batch already fetches and identity-gates the
+        # registry-linked homepage. Preserve that evidence when the optional
+        # breadth crawler is not installed, rather than aborting the batch.
+        write_jsonl(crawled_profiles, read_jsonl(base_profiles))
+        write_jsonl(crawl_events, [])
+        crawl_report.write_text(
+            json.dumps(
+                {
+                    "status": "skipped",
+                    "reason": "optional Scrapy runtime is not installed",
+                    "profiles": len(organisations),
+                    "website_seeds_selected": 0,
+                    "requests": 0,
+                    "crawl_complete": True,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     profiles = read_jsonl(crawled_profiles)
     site_activity_command = command(
@@ -295,21 +324,28 @@ def run(args: argparse.Namespace) -> None:
 
     osm_observations_path = out / "osm-observations.jsonl"
     osm_report_path = out / "osm-report.json"
-    osm_command = command(
-        "scripts/run_osm_places_connector.py",
-        "--profiles", str(crawled_profiles),
-        "--observations-output", str(osm_observations_path),
-        "--report-output", str(osm_report_path),
-        "--ledger", str(out / "osm-evidence-ledger.jsonl"),
-        "--budget", "300",
-    )
-    try:
-        subprocess.run(osm_command, cwd=ROOT, check=True)
-        attach_osm_evidence(profiles, read_jsonl(osm_observations_path))
-        osm_summary = json.loads(osm_report_path.read_text(encoding="utf-8"))
-        external_paths.append(str(osm_observations_path))
-    except (subprocess.CalledProcessError, OSError, json.JSONDecodeError) as exc:
-        osm_summary = {"connector": "osm_nominatim", "status": "failed", "error": str(exc)[:300]}
+    if args.enable_osm:
+        osm_command = command(
+            "scripts/run_osm_places_connector.py",
+            "--profiles", str(crawled_profiles),
+            "--observations-output", str(osm_observations_path),
+            "--report-output", str(osm_report_path),
+            "--ledger", str(out / "osm-evidence-ledger.jsonl"),
+            "--budget", "300",
+        )
+        try:
+            subprocess.run(osm_command, cwd=ROOT, check=True)
+            attach_osm_evidence(profiles, read_jsonl(osm_observations_path))
+            osm_summary = json.loads(osm_report_path.read_text(encoding="utf-8"))
+            external_paths.append(str(osm_observations_path))
+        except (subprocess.CalledProcessError, OSError, json.JSONDecodeError) as exc:
+            osm_summary = {"connector": "osm_nominatim", "status": "failed", "error": str(exc)[:300]}
+    else:
+        osm_summary = {
+            "connector": "osm_nominatim",
+            "status": "not_run",
+            "reason": "disabled by default to protect the evaluator time budget; pass --enable-osm to opt in",
+        }
 
     write_jsonl(crawled_profiles, profiles)
     base_envelopes = {row["organisation_number"]: row for row in read_jsonl(base_output)}
@@ -392,6 +428,7 @@ def main() -> None:
     parser.add_argument("--nav-threshold", type=int, default=100, choices=range(100, 101))
     parser.add_argument("--places-workers", type=int, default=4)
     parser.add_argument("--places-budget", type=float, default=600.0)
+    parser.add_argument("--enable-osm", action="store_true", help="Opt in to the time-capped OSM connector")
     run(parser.parse_args())
 
 
