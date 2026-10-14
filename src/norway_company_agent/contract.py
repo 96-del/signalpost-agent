@@ -176,6 +176,8 @@ def profile_to_contract(
                     or "unknown"
                 ),
                 "retrieved_at": record.get("retrieved_at") or "",
+                "reporting_period": record.get("as_of") or record.get("effective_at"),
+                "extraction_method": record.get("source_type") or record.get("source_class") or "unknown",
                 "content_sha256": record.get("content_sha256"),
                 "claim_span": _span(record),
             }
@@ -378,6 +380,71 @@ def profile_to_contract(
         else []
     )
 
+    registry_record = (
+        profile_evidence.get("registry_live")
+        or profile_evidence.get("registry")
+        or {}
+    )
+    registry_value = registry_record.get("value") or {}
+    website_record = profile_evidence.get("website") or {}
+    website_value = website_record.get("value") or {}
+    website_identity = website_value.get("identity_assessment") or {}
+    verified_site = (
+        website_record.get("status") == "available"
+        and website_identity.get("publishable") is True
+    )
+    flat_address = {
+        str(key).removeprefix("forretningsadresse."): value
+        for key, value in registry_value.items()
+        if str(key).startswith("forretningsadresse.") and value not in (None, "")
+    }
+    legal_identity = {
+        "organisation_number": str(profile.get("organisation_number") or ""),
+        "legal_name": profile.get("name") or registry_value.get("navn"),
+        "legal_form": profile.get("legal_form") or registry_value.get("organisasjonsform.kode"),
+        "registered_address": registry_value.get("forretningsadresse") or flat_address or None,
+        "municipality": profile.get("municipality") or registry_value.get("forretningsadresse.kommune"),
+        "municipality_number": profile.get("municipality_number") or registry_value.get("forretningsadresse.kommunenummer"),
+        "industry_code": profile.get("industry_code") or registry_value.get("naeringskode1.kode"),
+        "industry_label": profile.get("industry_label") or registry_value.get("naeringskode1.beskrivelse"),
+    }
+    public_brand = {
+        "name": website_value.get("title") if verified_site else None,
+        "website_url": website_value.get("final_url") or website_record.get("source_url") if verified_site else None,
+        "verified": verified_site,
+        "evidence_id": evidence_ids.get("website") if verified_site else None,
+    }
+
+    def snapshot_references(source_profile: dict[str, Any] | None) -> list[dict[str, Any]]:
+        references: list[dict[str, Any]] = []
+        for field, record in sorted((source_profile or {}).get("evidence", {}).items()):
+            if not isinstance(record, dict):
+                continue
+            identity = {
+                "org": (source_profile or {}).get("organisation_number"),
+                "field": field,
+                "url": record.get("source_url"),
+                "hash": record.get("content_sha256"),
+            }
+            if not record.get("content_sha256"):
+                identity["value"] = record.get("value")
+                identity["note"] = record.get("note")
+            references.append({
+                "id": _stable("ev", identity),
+                "field": str(field),
+                "source_url": record.get("source_url") or "",
+                "retrieved_at": record.get("retrieved_at") or "",
+                "reporting_period": record.get("as_of") or record.get("effective_at"),
+                "content_sha256": record.get("content_sha256"),
+                "source_class": record.get("source_class") or record.get("source_type") or "unknown",
+            })
+        return references
+
+    current_snapshots = snapshot_references(profile)
+    previous_snapshots = snapshot_references(previous_profile)
+    current_snapshot_id = _stable("snapshot", current_snapshots)
+    previous_snapshot_id = _stable("snapshot", previous_snapshots) if previous_profile is not None else None
+
     op = {
         "requests": 0,
         "runtime_ms": 0,
@@ -393,6 +460,8 @@ def profile_to_contract(
         "organisation_number": str(
             profile.get("organisation_number") or ""
         ),
+        "legal_identity": legal_identity,
+        "public_brand": public_brand,
         "run": {
             "run_id": run_id,
             "started_at": started_at or "",
@@ -401,6 +470,14 @@ def profile_to_contract(
         },
         "claims": claims,
         "evidence": evidence_out,
+        "source_snapshots": current_snapshots,
+        "refresh": {
+            "mode": "comparison" if previous_profile is not None else "initial",
+            "previous_snapshot_id": previous_snapshot_id,
+            "current_snapshot_id": current_snapshot_id,
+            "material_change_count": len(changes),
+            "previous_evidence": previous_snapshots,
+        },
         "changes": changes,
         "errors": list(errors or []),
         "operations": op,

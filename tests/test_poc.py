@@ -1478,6 +1478,20 @@ class StableEvidenceIdTests(unittest.TestCase):
         self.assertIn('"2025"', encoded)
         self.assertNotIn("NaN", encoded)
         self.assertNotIn("Infinity", encoded)
+        self.assertEqual(envelope["legal_identity"]["legal_name"], None)
+        self.assertEqual(envelope["refresh"]["mode"], "initial")
+        self.assertEqual(envelope["source_snapshots"][0]["field"], "registry")
+
+        previous = json.loads(json.dumps(profile, default=str))
+        previous["evidence"]["registry"]["retrieved_at"] = "2026-10-13T00:00:00Z"
+        refreshed = profile_to_contract(
+            profile,
+            run_id="strict-json-refresh",
+            previous_profile=previous,
+        )
+        self.assertEqual(refreshed["refresh"]["mode"], "comparison")
+        self.assertEqual(len(refreshed["refresh"]["previous_evidence"]), 1)
+        self.assertIsNotNone(refreshed["refresh"]["previous_snapshot_id"])
 
 class OverflowRunnerEndToEndTests(unittest.TestCase):
     def test_submitted_runner_accepts_evaluator_plain_csv_inputs(self):

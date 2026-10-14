@@ -102,6 +102,11 @@ uv run python scripts/run_signalpost_submission.py \
   --expected-count 100
 ```
 
+For a refresh, pass the prior run's `--previous-profiles out/submission-run/profiles.jsonl`.
+Each envelope then includes the previous evidence references, a stable current
+snapshot ID, and material changes. Without prior profiles, the envelope marks
+the run as an initial snapshot.
+
 `--bulk` accepts the evaluator's documented **plain CSV** registry snapshot
 and local gzip snapshots. The reader detects the file contents, rather than
 requiring a `.gz` filename. `--organisations` accepts JSON, JSONL, plain text,

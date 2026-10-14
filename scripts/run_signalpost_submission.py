@@ -252,6 +252,15 @@ def run(args: argparse.Namespace) -> None:
         )
 
     profiles = read_jsonl(crawled_profiles)
+    previous_profiles: dict[str, dict] = {}
+    if args.previous_profiles:
+        for previous in read_jsonl(Path(args.previous_profiles)):
+            organisation_number = str(previous.get("organisation_number") or "")
+            if not organisation_number:
+                raise SystemExit("Previous profile is missing organisation_number")
+            if organisation_number in previous_profiles:
+                raise SystemExit(f"Previous profiles contain duplicate organisation {organisation_number}")
+            previous_profiles[organisation_number] = previous
     site_activity_command = command(
         "scripts/extract_company_site_activity.py",
         "--profiles", str(crawled_profiles),
@@ -358,6 +367,7 @@ def run(args: argparse.Namespace) -> None:
             run_id=args.run_id,
             started_at=base_run.get("started_at"),
             completed_at=base_run.get("completed_at"),
+            previous_profile=previous_profiles.get(str(profile["organisation_number"])),
             operations={
                 "requests": metric.get("requests", 0),
                 "runtime_ms": sum(metric.get("latencies_ms") or []),
@@ -419,6 +429,7 @@ def main() -> None:
     parser.add_argument("--viewer", required=True, help="Inspectable static HTML evidence browser")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--expected-count", type=int, required=True)
+    parser.add_argument("--previous-profiles", help="Optional prior-run JSONL profiles for refresh diffs")
     parser.add_argument("--out-dir", default="out/submission-run")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--crawl-concurrency", type=int, default=16)
