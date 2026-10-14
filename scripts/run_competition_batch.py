@@ -30,8 +30,8 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluator-owned Signalpost batch contract")
-    parser.add_argument("--organisations", required=True, help="JSON, JSONL, or text organisation-number list")
-    parser.add_argument("--bulk", required=True, help="Frozen Brreg entity snapshot")
+    parser.add_argument("--organisations", required=True, help="JSON, JSONL, CSV, or text organisation-number list")
+    parser.add_argument("--bulk", required=True, help="Plain-CSV or gzip Brreg entity snapshot")
     parser.add_argument("--output", required=True, help="Terminal envelope JSONL")
     parser.add_argument("--profiles-output", required=True)
     parser.add_argument("--report", required=True)

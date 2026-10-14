@@ -152,9 +152,22 @@ def deterministic_financial_filer_sample(
 
 
 def iter_bulk(path: str | Path) -> Iterable[dict[str, Any]]:
-    with gzip.open(path, "rt", encoding="utf-8-sig", newline="") as handle:
+    """Yield registry rows from either Builderr's plain CSV or a gzip archive.
+
+    The evaluator names the registry input as a CSV, but a local download may
+    also be stored as gzip. Detect the bytes rather than trusting the file
+    extension so a valid evaluator-owned plain CSV cannot fail before a batch
+    has produced its first envelope.
+    """
+    source = Path(path)
+    with source.open("rb") as raw:
+        is_gzip = raw.read(2) == b"\x1f\x8b"
+    opener = gzip.open if is_gzip else open
+    with opener(source, "rt", encoding="utf-8-sig", newline="") as handle:
         sample = handle.read(8192)
         handle.seek(0)
+        if not sample.strip():
+            raise ValueError(f"Registry snapshot is empty: {source}")
         dialect = csv.Sniffer().sniff(sample, delimiters=";,\t")
         for row in csv.DictReader(handle, dialect=dialect):
             record = normalize_row(row)

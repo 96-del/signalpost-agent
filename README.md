@@ -101,15 +101,22 @@ uv run python scripts/run_signalpost_submission.py \
   --expected-count 100
 ```
 
+`--bulk` accepts the evaluator's documented **plain CSV** registry snapshot
+and local gzip snapshots. The reader detects the file contents, rather than
+requiring a `.gz` filename. `--organisations` accepts JSON, JSONL, plain text,
+or CSV with an `organisation_number`, `organization_number`,
+`organisasjonsnummer`, or `orgnr` header. The runner preserves the supplied
+input order and rejects duplicates or malformed organisation numbers.
+
 This runner does not publish third-party platform data until its source-rights
 and exact-entity gates are qualified. A local score is a diagnostic only; it
 is not an official Builderr score or a qualification claim.
 
-The runner also requires the shipped `out/nav-feed-snapshot.json.gz` cache to
-declare `feed_exhausted: true`; it fails closed on a partial cache. The cache
-is matched only at an exact normalized employer-name score and municipality,
-then a job claim retains its NAV URL, retrieval time, and snapshot hash. Keep
-that snapshot in the submitted commit alongside the command above.
+An exhausted local `out/nav-feed-snapshot.json.gz` cache is optional. When it
+is absent, unreadable, or partial, the runner records NAV as skipped and still
+returns the required result for every supplied company. It never publishes a
+NAV job claim unless the cache is exhausted and the employer identity matches
+exactly.
 
 For broader, permitted external recall, it can optionally call **Google Places
 API (New)**. This requires an evaluator-provided `GOOGLE_PLACES_API_KEY` and a

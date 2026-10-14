@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import csv
+import gzip
+import io
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -22,15 +25,78 @@ TERMINAL_STATES = {
 }
 
 
+def _read_input_text(source: Path) -> str:
+    """Read a supplied batch whether it is plain text or gzip compressed."""
+    with source.open("rb") as raw:
+        is_gzip = raw.read(2) == b"\x1f\x8b"
+    opener = gzip.open if is_gzip else open
+    with opener(source, "rt", encoding="utf-8-sig", newline="") as handle:
+        return handle.read()
+
+
+def _input_kind(source: Path) -> str:
+    suffixes = list(source.suffixes)
+    if suffixes and suffixes[-1].casefold() == ".gz":
+        suffixes.pop()
+    return suffixes[-1].casefold() if suffixes else ""
+
+
+def _csv_organisation_inputs(text: str, source: Path) -> list[dict[str, Any] | str]:
+    """Parse a documented evaluator CSV without silently choosing a column."""
+    try:
+        dialect = csv.Sniffer().sniff(text[:8192], delimiters=",;\t")
+    except csv.Error:
+        # A one-column CSV has no delimiter for Sniffer to find.
+        dialect = csv.excel
+    rows = list(csv.reader(io.StringIO(text), dialect=dialect))
+    rows = [row for row in rows if any(cell.strip() for cell in row)]
+    if not rows:
+        return []
+
+    def normalized(name: str) -> str:
+        return "".join(character for character in name.casefold() if character.isalnum())
+
+    headers = [normalized(value.strip()) for value in rows[0]]
+    accepted = {"organisationnumber", "organizationnumber", "organisasjonsnummer", "orgnr"}
+    try:
+        organisation_index = next(index for index, header in enumerate(headers) if header in accepted)
+    except StopIteration:
+        if any(len(row) != 1 for row in rows):
+            raise ValueError(
+                f"CSV organisation input needs an organisation-number header: {source}"
+            )
+        return [row[0].strip() for row in rows]
+
+    optional_indexes = {
+        key: index
+        for index, header in enumerate(headers)
+        for key in ("evaluation_split", "sample_slice")
+        if header == normalized(key)
+    }
+    values: list[dict[str, Any]] = []
+    for row in rows[1:]:
+        if organisation_index >= len(row):
+            raise ValueError(f"CSV row has no organisation number: {source}")
+        value: dict[str, Any] = {"organisation_number": row[organisation_index].strip()}
+        for key, index in optional_indexes.items():
+            if index < len(row) and row[index].strip():
+                value[key] = row[index].strip()
+        values.append(value)
+    return values
+
+
 def read_organisation_inputs(path: str | Path) -> list[dict[str, Any]]:
     source = Path(path)
-    text = source.read_text(encoding="utf-8")
+    text = _read_input_text(source)
     values: list[Any]
-    if source.suffix == ".json":
+    kind = _input_kind(source)
+    if kind == ".json":
         body = json.loads(text)
         values = body if isinstance(body, list) else body.get("organisation_numbers", [])
-    elif source.suffix == ".jsonl":
+    elif kind == ".jsonl":
         values = [json.loads(line) for line in text.splitlines() if line.strip()]
+    elif kind == ".csv":
+        values = _csv_organisation_inputs(text, source)
     else:
         values = [line.strip() for line in text.splitlines() if line.strip()]
     records = []

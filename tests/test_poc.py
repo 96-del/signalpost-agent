@@ -1453,14 +1453,14 @@ class StableEvidenceIdTests(unittest.TestCase):
         )
 
 class OverflowRunnerEndToEndTests(unittest.TestCase):
-    def test_submitted_runner_emits_100_with_overflow_row(self):
+    def test_submitted_runner_accepts_evaluator_plain_csv_inputs(self):
         root = Path(__file__).resolve().parents[1]
 
         with tempfile.TemporaryDirectory() as directory:
             d = Path(directory)
-            bulk = d / "registry.csv.gz"
+            bulk = d / "registry.csv"
 
-            with gzip.open(bulk, "wt", encoding="utf-8", newline="") as handle:
+            with bulk.open("w", encoding="utf-8", newline="") as handle:
                 handle.write(
                     "organisasjonsnummer;navn;organisasjonsform.kode\n"
                 )
@@ -1475,12 +1475,10 @@ class OverflowRunnerEndToEndTests(unittest.TestCase):
 
             orgs = [f"{100000000 + i}" for i in range(100)]
 
-            batch = d / "batch.jsonl"
+            batch = d / "batch.csv"
             batch.write_text(
-                "".join(
-                    json.dumps({"organisation_number": o}) + "\n"
-                    for o in orgs
-                ),
+                "organisation_number,evaluation_split,sample_slice\n"
+                + "".join(f"{o},held_out,stress\n" for o in orgs),
                 encoding="utf-8",
             )
 
