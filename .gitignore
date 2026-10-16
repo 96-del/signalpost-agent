@@ -5,3 +5,4 @@ brreg-enheter.csv
 nav-feed-snapshot.json
 nav-feed-snapshot.json.gz
 *.csv
+._*

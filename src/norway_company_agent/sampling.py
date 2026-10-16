@@ -11,13 +11,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-def _first(row: dict[str, str], *names: str) -> str:
-    for name in names:
-        value = row.get(name)
-        if value not in (None, ""):
-            return value
-    return ""
-
 def sanitize_csv_row(row: dict | None) -> dict[str, Any]:
     """Drop DictReader overflow cells stored under a None key."""
     cleaned: dict[str, Any] = {}
@@ -30,31 +23,44 @@ def sanitize_csv_row(row: dict | None) -> dict[str, Any]:
 
 def normalize_row(row: dict[str, str]) -> dict[str, Any]:
     row = sanitize_csv_row(row)
+    # Brreg and evaluator snapshots may use localized or English header names.
+    # Compare normalized spellings so BOMs, capitalization, spaces and underscores
+    # do not turn a valid organization number into an empty value.
+    normalized = {
+        "".join(character for character in str(key).casefold() if character.isalnum()): value
+        for key, value in row.items()
+    }
+
+    def first(*names: str) -> str:
+        for name in names:
+            value = normalized.get("".join(character for character in name.casefold() if character.isalnum()))
+            if value not in (None, ""):
+                return value
+        return ""
+
     org = "".join(
         character
-        for character in _first(
-            row, "organisasjonsnummer", "Organisasjonsnummer"
-        )
+        for character in first("organisasjonsnummer", "organisation_number", "organization_number", "orgnr")
         if character.isdigit()
     )
-    employees_raw = _first(row, "antallAnsatte", "Antall ansatte")
+    employees_raw = first("antallAnsatte", "Antall ansatte", "employees")
     try:
         employees = int(employees_raw) if employees_raw else None
     except ValueError:
         employees = None
     return {
         "organisation_number": org,
-        "name": _first(row, "navn", "Navn"),
-        "legal_form": _first(row, "organisasjonsform.kode", "Organisasjonsform.kode"),
+        "name": first("navn", "name"),
+        "legal_form": first("organisasjonsform.kode", "legal_form"),
         "employees": employees,
-        "bankrupt": _first(row, "konkurs", "Konkurs").lower() == "true",
-        "liquidating": _first(row, "underAvvikling", "Under avvikling").lower() == "true",
-        "municipality": _first(row, "forretningsadresse.kommune", "Forretningsadresse.kommune"),
-        "municipality_number": _first(row, "forretningsadresse.kommunenummer", "Forretningsadresse.kommunenummer"),
-        "industry_code": _first(row, "naeringskode1.kode", "Næringskode1.kode"),
-        "industry_label": _first(row, "naeringskode1.beskrivelse", "Næringskode1.beskrivelse"),
-        "website": _first(row, "hjemmeside", "Hjemmeside"),
-        "latest_submitted_accounts": _first(row, "sisteInnsendteAarsregnskap", "Siste innsendte årsregnskap"),
+        "bankrupt": first("konkurs", "bankrupt").lower() == "true",
+        "liquidating": first("underAvvikling", "Under avvikling", "liquidating").lower() == "true",
+        "municipality": first("forretningsadresse.kommune", "municipality"),
+        "municipality_number": first("forretningsadresse.kommunenummer", "municipality_number"),
+        "industry_code": first("naeringskode1.kode", "industry_code"),
+        "industry_label": first("naeringskode1.beskrivelse", "industry_label"),
+        "website": first("hjemmeside", "website"),
+        "latest_submitted_accounts": first("sisteInnsendteAarsregnskap", "latest_submitted_accounts"),
         "raw": row,
     }
 

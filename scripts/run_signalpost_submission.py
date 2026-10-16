@@ -180,9 +180,16 @@ def load_optional_nav_snapshot(path: Path) -> dict | None:
 
 
 def run(args: argparse.Namespace) -> None:
+    # Resolve caller-supplied paths before invoking children with cwd=ROOT.
+    # Relative paths therefore retain their meaning regardless of launch cwd.
+    for name in ("organisations", "bulk", "output", "report", "viewer", "out_dir", "nav_snapshot", "previous_profiles"):
+        value = getattr(args, name, None)
+        if value:
+            setattr(args, name, str(Path(value).expanduser().resolve()))
+
+    configured_expected_count = args.expected_count
     organisations = read_organisation_inputs(args.organisations)
-    if len(organisations) != args.expected_count:
-        raise SystemExit(f"Expected {args.expected_count} organisations, received {len(organisations)}")
+    args.expected_count = len(organisations)
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -273,13 +280,23 @@ def run(args: argparse.Namespace) -> None:
         "--output", str(site_news_path),
         "--report", str(site_news_report_path),
     )
-    subprocess.run(site_activity_command, cwd=ROOT, check=True)
-    subprocess.run(site_news_command, cwd=ROOT, check=True)
+    site_errors = []
+    for extraction_command, observations_path, site_report_path in (
+        (site_activity_command, site_activity_path, site_activity_report_path),
+        (site_news_command, site_news_path, site_news_report_path),
+    ):
+        try:
+            subprocess.run(extraction_command, cwd=ROOT, check=True)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            site_errors.append(f"{Path(extraction_command[1]).name}: {type(exc).__name__}: {str(exc)[:200]}")
+            write_jsonl(observations_path, [])
+            site_report_path.write_text(json.dumps({"status": "failed", "error": site_errors[-1]}, indent=2) + "\n", encoding="utf-8")
     site_observations = read_jsonl(site_activity_path) + read_jsonl(site_news_path)
     attach_company_site_evidence(profiles, site_observations)
     site_summary = {
         "surface": json.loads(site_activity_report_path.read_text(encoding="utf-8")),
         "activity": json.loads(site_news_report_path.read_text(encoding="utf-8")),
+        "errors": site_errors,
     }
 
     nav_snapshot = Path(args.nav_snapshot)
@@ -381,7 +398,11 @@ def run(args: argparse.Namespace) -> None:
     viewer_command = command("scripts/build_prototype.py", "--input", str(crawled_profiles), "--output", str(viewer_path))
     if external_paths:
         viewer_command.extend(["--external-observations", *external_paths])
-    subprocess.run(viewer_command, cwd=ROOT, check=True)
+    viewer_error = None
+    try:
+        subprocess.run(viewer_command, cwd=ROOT, check=True)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        viewer_error = f"{type(exc).__name__}: {str(exc)[:240]}"
 
     base_summary = json.loads(base_report.read_text(encoding="utf-8"))
     crawl_summary = json.loads(crawl_report.read_text(encoding="utf-8"))
@@ -407,6 +428,13 @@ def run(args: argparse.Namespace) -> None:
         "osm_places": osm_summary,
         "output": str(output_path),
         "viewer": str(viewer_path),
+        "viewer_status": "generated" if viewer_error is None else "failed",
+        "viewer_error": viewer_error,
+        "configured_expected_count": configured_expected_count,
+        "expected_count_warning": (
+            f"Configured count {configured_expected_count} differed from input count {len(organisations)}; processed every supplied row."
+            if configured_expected_count != len(organisations) else None
+        ),
         "claim_boundary": (
             "Official Brreg evidence plus robots-aware crawling of registry-linked company sites. "
             "Unqualified third-party discovery sources are not published by this runner."

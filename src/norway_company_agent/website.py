@@ -9,6 +9,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import urllib.robotparser
+from queue import Queue, Empty
+from threading import Thread
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,6 +22,7 @@ import trafilatura
 from .evidence import evidence
 
 USER_AGENT = "builderr-signalpost-poc/0.1 (+https://builderr.ai)"
+DOMAIN_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=())
 SOCIAL_HOSTS = {
     "linkedin.com": "linkedin",
     "facebook.com": "facebook",
@@ -37,17 +40,32 @@ PRIORITY_TERMS = (
 )
 
 
-def assert_public_url(url: str) -> None:
+def assert_public_url(url: str, *, dns_timeout: float = 5.0) -> None:
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").lower().rstrip(".")
     if parsed.scheme not in {"http", "https"} or not host:
         raise ValueError("Only public HTTP(S) URLs are allowed")
     if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
         raise ValueError("Local hosts are blocked")
+    result: Queue[tuple[set[str] | None, Exception | None]] = Queue(maxsize=1)
+
+    def resolve() -> None:
+        try:
+            addresses = {item[4][0] for item in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
+            result.put((addresses, None))
+        except Exception as exc:
+            result.put((None, exc))
+
+    Thread(target=resolve, daemon=True, name="signalpost-dns-check").start()
     try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
-    except socket.gaierror as exc:
-        raise ValueError("Hostname did not resolve") from exc
+        addresses, error = result.get(timeout=dns_timeout)
+    except Empty as exc:
+        raise ValueError("Hostname lookup timed out") from exc
+    if error is not None:
+        if isinstance(error, socket.gaierror):
+            raise ValueError("Hostname did not resolve") from error
+        raise ValueError(f"Hostname lookup failed: {type(error).__name__}") from error
+    addresses = addresses or set()
     for address in addresses:
         ip = ipaddress.ip_address(address)
         if not ip.is_global:
@@ -77,7 +95,7 @@ def normalize_homepage(value: str | None) -> str | None:
 
 def _registered_domain(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
-    ext = tldextract.extract(parsed.hostname or "")
+    ext = DOMAIN_EXTRACTOR(parsed.hostname or "")
     return ext.top_domain_under_public_suffix
 
 
@@ -90,7 +108,7 @@ def _robots_allowed(url: str, timeout: float) -> bool:
     try:
         request = urllib.request.Request(robots_url, headers={"User-Agent": USER_AGENT})
         with SAFE_OPENER.open(request, timeout=timeout) as response:
-            parser.parse(response.read().decode("utf-8", errors="replace").splitlines())
+            parser.parse(response.read(256 * 1024).decode("utf-8", errors="replace").splitlines())
         return parser.can_fetch(USER_AGENT, url)
     except Exception:
         # An unavailable robots file is not permission to ignore explicit site terms; callers retain
@@ -260,15 +278,22 @@ def _extraction_state(text: str, soup: BeautifulSoup) -> str:
 def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_000_000) -> tuple[dict[str, Any], dict[str, Any]]:
     supplied_url = str(url or "").strip()
     supplied_scheme = bool(re.match(r"^https?://", supplied_url, re.I))
-    normalized = normalize_homepage(url)
+    try:
+        normalized = normalize_homepage(url)
+    except (ValueError, UnicodeError) as exc:
+        return evidence("website", "source_error", "registry_linked_company_website", supplied_url or "https://data.brreg.no/enhetsregisteret/api/enheter", note=f"Invalid registry website URL: {str(exc)[:160]}"), {"requests": 0, "bytes": 0, "latencies_ms": []}
     if not normalized:
         return evidence("website", "not_found", "registry_linked_company_website", "https://data.brreg.no/enhetsregisteret/api/enheter", note="No valid registry website URL"), {"requests": 0, "bytes": 0, "latencies_ms": []}
     try:
         assert_public_url(normalized)
     except ValueError as exc:
-        return evidence("website", "blocked", "registry_linked_company_website", normalized, note=str(exc)), {"requests": 0, "bytes": 0, "latencies_ms": []}
-    if not _robots_allowed(normalized, timeout):
-        return evidence("website", "blocked", "registry_linked_company_website", normalized, note="robots.txt disallows this user agent"), {"requests": 1, "bytes": 0, "latencies_ms": []}
+        status = "source_error" if "did not resolve" in str(exc).casefold() or "timed out" in str(exc).casefold() or "lookup failed" in str(exc).casefold() else "blocked"
+        return evidence("website", status, "registry_linked_company_website", normalized, note=str(exc)), {"requests": 0, "bytes": 0, "latencies_ms": []}
+    try:
+        if not _robots_allowed(normalized, timeout):
+            return evidence("website", "blocked", "registry_linked_company_website", normalized, note="robots.txt disallows this user agent"), {"requests": 1, "bytes": 0, "latencies_ms": []}
+    except Exception as exc:
+        return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"robots check failed: {type(exc).__name__}: {str(exc)[:140]}"), {"requests": 1, "bytes": 0, "latencies_ms": []}
     started = time.monotonic()
     request = urllib.request.Request(normalized, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
     try:

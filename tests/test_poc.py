@@ -33,7 +33,7 @@ from norway_company_agent.external_footprint import aggregate_footprint, publish
 from norway_company_agent.external_tasks import plan_external_tasks  # noqa: E402
 from norway_company_agent.external_control import development_score, run_company_control, strategy_order  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate, assess_social_identity, assess_website_identity  # noqa: E402
-from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
+from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, fetch_website, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.snapshots import SnapshotFetcher  # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
@@ -43,6 +43,7 @@ from scripts.run_annual_report_workforce_connector import extract_candidate, nee
 from scripts.normalize_google_maps_results import candidate_score  # noqa: E402
 from scripts.run_scrapy_websites import terminal_events_for_run  # noqa: E402
 from scripts.run_signalpost_submission import attach_company_site_evidence, attach_nav_evidence  # noqa: E402
+from scripts import run_competition_batch as competition_batch_runner  # noqa: E402
 from scripts.run_sentiment_model import MODEL_REVISION, normalize_generated_label  # noqa: E402
 from scripts.score_company_completeness import score_rows, summarize  # noqa: E402
 from scripts.extract_company_site_activity import observation as site_activity_observation  # noqa: E402
@@ -732,6 +733,27 @@ class OperationsTests(unittest.TestCase):
             path.write_text(json.dumps({"organisation_number": "923609016", "evaluation_split": "held_out", "sample_slice": "stress", "ignored": "x"}) + "\n", encoding="utf-8")
             self.assertEqual(read_organisation_inputs(path), [{"organisation_number": "923609016", "evaluation_split": "held_out", "sample_slice": "stress"}])
 
+    def test_batch_input_accepts_header_aliases_without_csv_extension(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "batch.txt"
+            path.write_text("organization_number\n\"923 609 016\"\n", encoding="utf-8-sig")
+            self.assertEqual(read_organisation_inputs(path), [{"organisation_number": "923609016"}])
+            path.write_text('{"orgnr": "923 609 016"}\n', encoding="utf-8")
+            self.assertEqual(read_organisation_inputs(path), [{"organisation_number": "923609016"}])
+
+    def test_missing_registry_member_becomes_terminal_source_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.csv"
+            path.write_text("organisasjonsnummer;navn\n923609016;Present AS\n", encoding="utf-8")
+            profiles, metadata = profiles_from_bulk(path, ["923609016", "999999999"])
+            self.assertEqual([row["organisation_number"] for row in profiles], ["923609016", "999999999"])
+            self.assertEqual(profiles[1]["evidence"]["registry"]["status"], "source_error")
+            self.assertEqual(metadata["missing_organisation_numbers"], ["999999999"])
+
+    def test_invalid_homepage_url_is_a_record_not_an_exception(self):
+        record, _ = fetch_website("http://[")
+        self.assertEqual(record["status"], "source_error")
+
     def test_batch_contract_emits_exact_terminal_envelopes(self):
         profile = {
             "organisation_number": "923609016",
@@ -1281,6 +1303,17 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(change["new_value"], 0)
         self.assertEqual(change["source_url"], "https://example.test/entity")
 
+    def test_transient_failed_refresh_does_not_claim_a_material_change(self):
+        old = {
+            "organisation_number": "923609016",
+            "evidence": {"website": evidence("website", "available", "company_site", "https://example.test", value={"title": "Old title"})},
+        }
+        new = {
+            "organisation_number": "923609016",
+            "evidence": {"website": evidence("website", "source_error", "company_site", "https://example.test", note="temporary DNS failure")},
+        }
+        self.assertEqual(diff_profile(old, new), [])
+
     def test_refresh_rejects_membership_or_identity_drift(self):
         with self.assertRaises(ValueError):
             diff_datasets([{"organisation_number": "923609016"}], [{"organisation_number": "999999999"}])
@@ -1493,7 +1526,77 @@ class StableEvidenceIdTests(unittest.TestCase):
         self.assertEqual(len(refreshed["refresh"]["previous_evidence"]), 1)
         self.assertIsNotNone(refreshed["refresh"]["previous_snapshot_id"])
 
+        reretrieved_profile = json.loads(json.dumps(profile, default=str))
+        reretrieved_profile["evidence"]["registry"]["retrieved_at"] = "2026-10-14T00:00:00Z"
+        reretrieved = profile_to_contract(reretrieved_profile, run_id="strict-json-reretrieved")
+        self.assertEqual(envelope["refresh"]["current_snapshot_id"], reretrieved["refresh"]["current_snapshot_id"])
+
+        from_envelope = profile_to_contract(
+            profile,
+            run_id="strict-json-envelope-refresh",
+            previous_profile=envelope,
+        )
+        self.assertEqual(from_envelope["refresh"]["mode"], "comparison_unavailable")
+        self.assertEqual(len(from_envelope["refresh"]["previous_evidence"]), 1)
+        self.assertEqual(from_envelope["errors"][0]["type"], "refresh_comparison_unavailable")
+
 class OverflowRunnerEndToEndTests(unittest.TestCase):
+    def test_one_command_runner_uses_absolute_paths_from_foreign_working_directory(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            batch = d / "input.csv"
+            batch.write_text("orgnr\n923609016\n", encoding="utf-8")
+            bulk = d / "registry.csv"
+            bulk.write_text("organisasjonsnummer;navn;organisasjonsform.kode\n923609016;Example AS;AS\n", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable, str(root / "scripts/run_signalpost_submission.py"),
+                    "--organisations", str(batch), "--bulk", str(bulk),
+                    "--output", str(d / "final.jsonl"), "--report", str(d / "report.json"),
+                    "--viewer", str(d / "viewer.html"), "--run-id", "foreign-cwd", "--expected-count", "1",
+                    "--out-dir", "relative-intermediate", "--nav-snapshot", "missing-nav.gz",
+                    "--modules", "registry,accounting_obligation",
+                ],
+                cwd=d,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr[-2000:] + result.stdout[-2000:])
+            report = json.loads((d / "report.json").read_text(encoding="utf-8"))
+            self.assertTrue(report["validation"]["passed"])
+            self.assertEqual(len((d / "final.jsonl").read_text(encoding="utf-8").splitlines()), 1)
+            self.assertTrue((d / "viewer.html").exists())
+            self.assertTrue((d / "relative-intermediate/base-report.json").exists())
+
+    def test_single_company_worker_exception_still_emits_terminal_envelope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            batch = d / "batch.csv"
+            batch.write_text("orgnr\n923609016\n", encoding="utf-8")
+            bulk = d / "registry.csv"
+            bulk.write_text("organisasjonsnummer;navn;organisasjonsform.kode\n923609016;Example AS;AS\n", encoding="utf-8")
+            argv = [
+                "run_competition_batch.py", "--organisations", str(batch), "--bulk", str(bulk),
+                "--profiles-output", str(d / "profiles.jsonl"), "--output", str(d / "envelopes.jsonl"),
+                "--report", str(d / "report.json"), "--run-id", "worker-error", "--expected-count", "1000",
+                "--modules", "registry,accounting_obligation,website",
+            ]
+            with patch.object(sys, "argv", argv), patch.object(
+                competition_batch_runner, "fetch_website", side_effect=RuntimeError("temporary worker failure")
+            ):
+                with self.assertRaises(SystemExit) as exit_info:
+                    competition_batch_runner.main()
+            self.assertEqual(exit_info.exception.code, 0)
+            envelope = json.loads((d / "envelopes.jsonl").read_text(encoding="utf-8").strip())
+            self.assertEqual(envelope["organisation_number"], "923609016")
+            profile = json.loads((d / "profiles.jsonl").read_text(encoding="utf-8").strip())
+            self.assertEqual(profile["evidence"]["website"]["status"], "source_error")
+            report = json.loads((d / "report.json").read_text(encoding="utf-8"))
+            self.assertTrue(report["validation"]["passed"])
+            self.assertEqual(report["expected_count_warning"], "Configured count 1000 differed from input count 1; processed every supplied row.")
+
     def test_submitted_runner_accepts_evaluator_plain_csv_inputs(self):
         root = Path(__file__).resolve().parents[1]
 

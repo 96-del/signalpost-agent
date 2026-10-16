@@ -48,6 +48,10 @@ def diff_profile(previous: dict[str, Any], current: dict[str, Any]) -> list[dict
         if old_value == new_value:
             continue
         record = _evidence_for(current, field)
+        if record.get("status") in {"source_error", "blocked", "not_fetched"}:
+            # A transient collection failure is missing evidence, not proof that
+            # the previously observed fact was removed or changed.
+            continue
         previous_record = _evidence_for(previous, field)
         changes.append({
             "organisation_number": new_org,

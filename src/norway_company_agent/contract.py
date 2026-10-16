@@ -327,6 +327,8 @@ def profile_to_contract(
             "what_changed": (
                 "No prior snapshot was supplied for comparison."
                 if previous_profile is None
+                else "Prior snapshot was an output envelope; raw field comparison was unavailable."
+                if not isinstance(previous_profile.get("evidence"), dict)
                 else (
                     [
                         item
@@ -374,11 +376,8 @@ def profile_to_contract(
         else "completed_with_errors"
     )
 
-    changes = (
-        diff_profile(previous_profile, profile)
-        if previous_profile is not None
-        else []
-    )
+    previous_is_profile = previous_profile is not None and isinstance(previous_profile.get("evidence"), dict)
+    changes = diff_profile(previous_profile, profile) if previous_is_profile else []
 
     registry_record = (
         profile_evidence.get("registry_live")
@@ -402,7 +401,7 @@ def profile_to_contract(
         "organisation_number": str(profile.get("organisation_number") or ""),
         "legal_name": profile.get("name") or registry_value.get("navn"),
         "legal_form": profile.get("legal_form") or registry_value.get("organisasjonsform.kode"),
-        "registered_address": registry_value.get("forretningsadresse") or flat_address or None,
+        "registered_address": registry_value.get("forretningsadresse") or registry_value.get("business_address") or flat_address or None,
         "municipality": profile.get("municipality") or registry_value.get("forretningsadresse.kommune"),
         "municipality_number": profile.get("municipality_number") or registry_value.get("forretningsadresse.kommunenummer"),
         "industry_code": profile.get("industry_code") or registry_value.get("naeringskode1.kode"),
@@ -417,7 +416,23 @@ def profile_to_contract(
 
     def snapshot_references(source_profile: dict[str, Any] | None) -> list[dict[str, Any]]:
         references: list[dict[str, Any]] = []
-        for field, record in sorted((source_profile or {}).get("evidence", {}).items()):
+        source_profile = source_profile or {}
+        raw_evidence = source_profile.get("evidence", {})
+        if isinstance(raw_evidence, list):
+            raw_evidence = {
+                str(item.get("field") or item.get("id") or index): item
+                for index, item in enumerate(raw_evidence)
+                if isinstance(item, dict)
+            }
+        if not raw_evidence and isinstance(source_profile.get("source_snapshots"), list):
+            raw_evidence = {
+                str(item.get("field") or index): item
+                for index, item in enumerate(source_profile["source_snapshots"])
+                if isinstance(item, dict)
+            }
+        if not isinstance(raw_evidence, dict):
+            raw_evidence = {}
+        for field, record in sorted(raw_evidence.items()):
             if not isinstance(record, dict):
                 continue
             identity = {
@@ -426,7 +441,7 @@ def profile_to_contract(
                 "url": record.get("source_url"),
                 "hash": record.get("content_sha256"),
             }
-            if not record.get("content_sha256"):
+            if not record.get("content_sha256") and "claim_span" not in record and "id" not in record:
                 identity["value"] = record.get("value")
                 identity["note"] = record.get("note")
             references.append({
@@ -442,8 +457,21 @@ def profile_to_contract(
 
     current_snapshots = snapshot_references(profile)
     previous_snapshots = snapshot_references(previous_profile)
-    current_snapshot_id = _stable("snapshot", current_snapshots)
-    previous_snapshot_id = _stable("snapshot", previous_snapshots) if previous_profile is not None else None
+    stable_snapshot = lambda refs: [
+        {key: value for key, value in item.items() if key != "retrieved_at"}
+        for item in refs
+    ]
+    current_snapshot_id = _stable("snapshot", stable_snapshot(current_snapshots))
+    previous_snapshot_id = _stable("snapshot", stable_snapshot(previous_snapshots)) if previous_profile is not None else None
+
+    output_errors = list(errors or [])
+    if previous_profile is not None and not previous_is_profile:
+        output_errors.append({
+            "type": "refresh_comparison_unavailable",
+            "message": "Prior input was an output envelope; raw profile fields were unavailable for material-change comparison.",
+        })
+    if output_errors:
+        run_status = "completed_with_errors"
 
     op = {
         "requests": 0,
@@ -472,14 +500,14 @@ def profile_to_contract(
         "evidence": evidence_out,
         "source_snapshots": current_snapshots,
         "refresh": {
-            "mode": "comparison" if previous_profile is not None else "initial",
+            "mode": "comparison" if previous_is_profile else "comparison_unavailable" if previous_profile is not None else "initial",
             "previous_snapshot_id": previous_snapshot_id,
             "current_snapshot_id": current_snapshot_id,
             "material_change_count": len(changes),
             "previous_evidence": previous_snapshots,
         },
         "changes": changes,
-        "errors": list(errors or []),
+        "errors": output_errors,
         "operations": op,
     })
 

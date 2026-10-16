@@ -92,16 +92,35 @@ def read_organisation_inputs(path: str | Path) -> list[dict[str, Any]]:
     kind = _input_kind(source)
     if kind == ".json":
         body = json.loads(text)
-        values = body if isinstance(body, list) else body.get("organisation_numbers", [])
+        values = body if isinstance(body, list) else body.get("organisation_numbers", [body] if isinstance(body, dict) else [])
     elif kind == ".jsonl":
         values = [json.loads(line) for line in text.splitlines() if line.strip()]
-    elif kind == ".csv":
+    elif kind in {".csv", ".tsv"}:
         values = _csv_organisation_inputs(text, source)
     else:
-        values = [line.strip() for line in text.splitlines() if line.strip()]
+        stripped = text.lstrip()
+        if stripped.startswith(("[", "{")):
+            try:
+                body = json.loads(text)
+                values = body if isinstance(body, list) else body.get("organisation_numbers", [body] if isinstance(body, dict) else [])
+            except json.JSONDecodeError:
+                values = _csv_organisation_inputs(text, source)
+        else:
+            first_line = next((line for line in text.splitlines() if line.strip()), "")
+            header = "".join(ch for ch in first_line.casefold() if ch.isalnum())
+            accepted = {"organisationnumber", "organizationnumber", "organisasjonsnummer", "orgnr"}
+            if header in accepted or any(separator in first_line for separator in (",", ";", "\t")):
+                values = _csv_organisation_inputs(text, source)
+            else:
+                values = [line.strip() for line in text.splitlines() if line.strip()]
     records = []
     for value in values:
-        org = value.get("organisation_number") if isinstance(value, dict) else value
+        org = None
+        if isinstance(value, dict):
+            normalized = {"".join(ch for ch in str(key).casefold() if ch.isalnum()): val for key, val in value.items()}
+            org = next((normalized[key] for key in ("organisationnumber", "organizationnumber", "organisasjonsnummer", "orgnr") if key in normalized), None)
+        else:
+            org = value
         org = "".join(character for character in str(org or "") if character.isdigit())
         if len(org) != 9:
             raise ValueError(f"Invalid Norwegian organisation number: {value!r}")
@@ -124,7 +143,11 @@ def read_organisation_numbers(path: str | Path) -> list[str]:
 def profiles_from_bulk(path: str | Path, organisation_numbers: Iterable[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     requested = list(organisation_numbers)
     wanted = set(requested)
-    snapshot_sha256 = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    hasher = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    snapshot_sha256 = hasher.hexdigest()
     retrieved_at = utc_now()
     found: dict[str, dict[str, Any]] = {}
     scanned = 0
@@ -151,13 +174,38 @@ def profiles_from_bulk(path: str | Path, organisation_numbers: Iterable[str]) ->
         if len(found) == len(wanted):
             break
     missing = [org for org in requested if org not in found]
-    if missing:
-        raise ValueError(f"Organisation numbers absent from registry snapshot: {missing[:10]}")
+    for org in missing:
+        note = "Organisation number was not present in the supplied registry snapshot"
+        found[org] = {
+            "organisation_number": org,
+            "name": "",
+            "legal_form": "",
+            "employees": None,
+            "municipality": "",
+            "municipality_number": "",
+            "industry_code": "",
+            "industry_label": "",
+            "website": "",
+            "evidence": {
+                "registry": evidence(
+                    "registry", "source_error", "official_registry_bulk",
+                    "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
+                    note=note, content_sha256=snapshot_sha256, source_row_key=org,
+                ),
+                "accounting_obligation": evidence(
+                    "accounting_obligation", "source_error", "official_registry_bulk",
+                    "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
+                    note=f"Cannot assess accounting obligation: {note}", content_sha256=snapshot_sha256,
+                    source_row_key=org,
+                ),
+            },
+        }
     return [found[org] for org in requested], {
         "registry_snapshot_sha256": snapshot_sha256,
         "registry_rows_scanned": scanned,
         "requested": len(requested),
         "selected": len(found),
+        "missing_organisation_numbers": missing,
     }
 
 

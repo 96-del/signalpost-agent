@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from norway_company_agent.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.contract import profile_to_contract  # noqa: E402
-from norway_company_agent.evidence import utc_now  # noqa: E402
+from norway_company_agent.evidence import evidence, utc_now  # noqa: E402
 from norway_company_agent.state_store import SQLiteStateStore  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
 from norway_company_agent.official import fetch_official_modules  # noqa: E402
@@ -47,8 +47,8 @@ def main() -> None:
     started_at = utc_now()
     organisation_inputs = read_organisation_inputs(args.organisations)
     orgs = [item["organisation_number"] for item in organisation_inputs]
-    if len(orgs) != args.expected_count:
-        raise SystemExit(f"Expected {args.expected_count} organisations, received {len(orgs)}")
+    configured_expected_count = args.expected_count
+    effective_expected_count = len(orgs)
     profiles, registry_metadata = profiles_from_bulk(args.bulk, orgs)
     annotations = {item["organisation_number"]: item for item in organisation_inputs}
     for profile in profiles:
@@ -74,6 +74,23 @@ def main() -> None:
         profile["run_metrics"] = metric
         return profile, metric
 
+    def failed_enrichment(profile: dict, exc: Exception) -> tuple[dict, dict]:
+        """Convert a per-company connector exception into terminal evidence."""
+        note = f"Per-company enrichment failed: {type(exc).__name__}: {str(exc)[:240]}"
+        for module in fetch_modules:
+            profile.setdefault("evidence", {}).setdefault(
+                module,
+                evidence(module, "source_error", "connector_runtime", "https://builderr.ai/challenges/signalpost", note=note),
+            )
+        if "website" in requested_modules:
+            profile.setdefault("evidence", {}).setdefault(
+                "website",
+                evidence("website", "source_error", "registry_linked_company_website", "https://data.brreg.no/enhetsregisteret/api/enheter", note=note),
+            )
+        metric = {"requests": 0, "bytes": 0, "latencies_ms": []}
+        profile["run_metrics"] = metric
+        return profile, metric
+
     state: dict[str, dict] = {}
     resumed_profiles = 0
     profiles_output = Path(args.profiles_output)
@@ -91,7 +108,12 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(enrich, profile): profile["organisation_number"] for profile in pending_profiles}
         for index, future in enumerate(as_completed(futures), 1):
-            profile, metric = future.result()
+            org = futures[future]
+            try:
+                profile, metric = future.result()
+            except Exception as exc:
+                original = next(item for item in pending_profiles if item["organisation_number"] == org)
+                profile, metric = failed_enrichment(original, exc)
             state[profile["organisation_number"]] = profile
             operations["requests"] += metric["requests"]
             operations["bytes"] += metric["bytes"]
@@ -106,7 +128,7 @@ def main() -> None:
         terminal_envelope(profile, run_id=args.run_id, modules=requested_modules, started_at=started_at, completed_at=completed_at)
         for profile in ordered_profiles
     ]
-    validation = validate_envelopes(envelopes, args.expected_count)
+    validation = validate_envelopes(envelopes, effective_expected_count)
     write_jsonl(profiles_output, ordered_profiles)
     if args.state_db:
         with SQLiteStateStore(args.state_db) as store:
@@ -118,7 +140,7 @@ def main() -> None:
                 status="completed",
                 started_at=started_at,
                 completed_at=completed_at,
-                metadata={"expected_count": args.expected_count, "modules": requested_modules},
+                metadata={"expected_count": effective_expected_count, "modules": requested_modules},
             )
             store.record_operation(
                 "competition_batch",
@@ -153,7 +175,12 @@ def main() -> None:
         "run_id": args.run_id,
         "started_at": started_at,
         "completed_at": completed_at,
-        "expected_count": args.expected_count,
+        "expected_count": effective_expected_count,
+        "configured_expected_count": configured_expected_count,
+        "expected_count_warning": (
+            f"Configured count {configured_expected_count} differed from input count {effective_expected_count}; processed every supplied row."
+            if configured_expected_count != effective_expected_count else None
+        ),
         "emitted_envelopes": len(envelopes),
         "resumed_profiles": resumed_profiles,
         "profiles_fetched_this_run": len(pending_profiles),
