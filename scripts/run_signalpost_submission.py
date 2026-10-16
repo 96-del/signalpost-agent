@@ -43,6 +43,13 @@ def crawler_runtime_available() -> bool:
     return importlib.util.find_spec("scrapy") is not None
 
 
+def third_party_cost_report(places_enabled: bool) -> tuple[float | None, str]:
+    """Never report a zero estimate when a paid connector was actually called."""
+    if places_enabled:
+        return None, "unknown_requires_provider_billing_data"
+    return 0.0, "zero_paid_api_calls"
+
+
 def attach_places_evidence(profiles: list[dict], observations: list[dict]) -> None:
     field_for_signal = {
         "place_summary": "places_identity",
@@ -328,7 +335,8 @@ def run(args: argparse.Namespace) -> None:
     external_paths: list[str] = [str(site_activity_path), str(site_news_path)]
     api_key = os.environ.get("GOOGLE_PLACES_API_KEY", "")
     rights_approved = os.environ.get("SIGNALPOST_GOOGLE_PLACES_RIGHTS", "").casefold() == "approved"
-    if api_key and rights_approved:
+    places_enabled = bool(api_key and rights_approved)
+    if places_enabled:
         from run_google_places_api_connector import run as run_google_places
 
         observations, places_summary = run_google_places(
@@ -373,6 +381,8 @@ def run(args: argparse.Namespace) -> None:
             "reason": "disabled by default to protect the evaluator time budget; pass --enable-osm to opt in",
         }
 
+    third_party_cost_usd, third_party_cost_status = third_party_cost_report(places_enabled)
+
     write_jsonl(crawled_profiles, profiles)
     base_envelopes = {row["organisation_number"]: row for row in read_jsonl(base_output)}
     contract_rows = []
@@ -388,7 +398,7 @@ def run(args: argparse.Namespace) -> None:
             operations={
                 "requests": metric.get("requests", 0),
                 "runtime_ms": sum(metric.get("latencies_ms") or []),
-                "third_party_cost_usd": 0,
+                "third_party_cost_usd": third_party_cost_usd,
             },
         ))
     output_path = Path(args.output)
@@ -426,6 +436,8 @@ def run(args: argparse.Namespace) -> None:
         "nav_workforce": nav_summary,
         "google_places": places_summary,
         "osm_places": osm_summary,
+        "third_party_cost_usd": third_party_cost_usd,
+        "third_party_cost_status": third_party_cost_status,
         "output": str(output_path),
         "viewer": str(viewer_path),
         "viewer_status": "generated" if viewer_error is None else "failed",

@@ -24,7 +24,12 @@ def capped(weight: float, value: float | int | None) -> float:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Signalpost competition proxy v3: external intelligence is the primary differentiator.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "LEGACY local diagnostic only. This v3 rubric predates the published Signalpost "
+            "50/30/12/8 rubric and must not be used to predict qualification."
+        )
+    )
     parser.add_argument("--profiles", required=True)
     parser.add_argument("--external-report", required=True)
     parser.add_argument("--batch-report", required=True)
@@ -135,10 +140,15 @@ def main() -> None:
         "terminal_batch_contract": batch_valid,
         "refresh_replay": refresh_valid,
     }
-    qualification = all(gates.values())
+    proxy_gates_passed = all(gates.values())
     report = {
         "scorer": "signalpost_external_first_competition_proxy_v3",
-        "claim_boundary": "Optimization proxy. Final score requires the organiser's frozen hidden companies and independent labels.",
+        "metric_scope": "legacy_local_proxy_not_official",
+        "claim_boundary": (
+            "Obsolete local diagnostic using the former 55/15/10/12/8 rubric. It is not comparable "
+            "to the current official score and cannot determine qualification."
+        ),
+        "official_score": None,
         "rubric_weights": {
             "external_footprint_intelligence": 55,
             "official_company_foundation": 15,
@@ -151,10 +161,11 @@ def main() -> None:
         "category_scores": categories,
         "raw_score": raw_score,
         "target": args.target,
-        "target_met": raw_score >= args.target,
+        "legacy_proxy_target_met": raw_score >= args.target,
         "qualification_gates": gates,
-        "qualification_passed": qualification,
-        "awardable_score": raw_score if qualification else 0,
+        "legacy_proxy_gates_passed": proxy_gates_passed,
+        "qualification_passed": None,
+        "awardable_score": None,
         "unproven_or_failed": [name for name, passed in gates.items() if not passed],
     }
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)

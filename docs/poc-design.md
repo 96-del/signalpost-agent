@@ -56,22 +56,14 @@ the snapshot ETag/hash and seed.
 
 ## Score and control loop
 
-The original official-data-heavy rubric is superseded. The competition proxy is now:
+The [official challenge page](https://builderr.ai/challenges/signalpost), checked 2026-10-16, is the
+source of truth: qualification requires at least 65/100 on an official run, scored across recall/coverage
+(50), precision/evidence (30), synthesis (12), and UX (8). Builderr supplies the evaluation batch; local
+proxy scores do not qualify an entry or predict its official score. Within recall/coverage, the page says
+70% of each information type's coverage score is based on company reach and 30% on the number of checked
+facts found.
 
-- External-footprint intelligence: 55
-- Official company foundation: 15
-- Research agent: 10
-- Daily extensibility and refresh: 12
-- Product UX and design: 8
-
-External points cover verified multi-source handles, workforce/jobs, ratings/reviews, buzz/engagement,
-qualified sentiment, and freshness. See [`external-footprint-loop.md`](external-footprint-loop.md).
-
-Each module records baseline, current score, target, error buckets, latency, requests, and bytes.
-The next iteration must address the largest recoverable error bucket. Stop a module after two
-iterations without a material score improvement, and report the blocker rather than widening claims.
-
-## Initial targets
+The following are proposed **internal engineering targets**, not Builderr thresholds or guarantees:
 
 - Registry identity mismatches: 0/1,000.
 - Evidence-schema validity: 100%.
@@ -82,10 +74,19 @@ iterations without a material score improvement, and report the blocker rather t
 - Resumed run duplicates: 0.
 - P95 official request latency: reported, not hidden behind an average.
 
-Qualification additionally requires: no systematic cross-company join error, no fabricated
-material claim, financial numeric accuracy of at least 98% on available held-out gold, entity-link
-precision of at least 99.5%, claim-to-source support of at least 95%, and seeded refresh
-precision/recall of at least 95%.
+Each module records baseline, current score, target, error buckets, latency, requests, and bytes.
+The next iteration must address the largest recoverable error bucket. Stop a module after two
+iterations without a material score improvement, and report the blocker rather than widening claims.
+See [`external-footprint-loop.md`](external-footprint-loop.md) for internal connector metrics and gates;
+they are research controls, not a substitute for Builderr's official scoring.
+
+## Official qualification constraints
+
+There are no project-invented qualification thresholds. The published qualification requirements include
+one result for every supplied company; distinct terminal states for available, not_available, blocked,
+not_applicable, ambiguous, and failed; source, retrieval date, and relevant reporting period for claims;
+safe and reproducible execution; and no material wrong-company match. Consult the official page and linked
+evaluation contract for the current full terms.
 
 ## Evidence that changes the plan
 
@@ -98,7 +99,7 @@ precision/recall of at least 95%.
 
 ## External-footprint qualification
 
-External intelligence is now the core scoring surface, but unqualified connectors remain quarantined.
+External information can improve recall/coverage, but unqualified connectors remain quarantined.
 Search output can nominate a URL but cannot prove company identity. A sentiment item needs exact-entity
 and source-span checks; a company rollup needs multiple independent sources. No external module earns
-points before the held-out evidence and rights gates in [`external-footprint-loop.md`](external-footprint-loop.md).
+trust before the held-out evidence and rights gates in [`external-footprint-loop.md`](external-footprint-loop.md).

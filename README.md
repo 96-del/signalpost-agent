@@ -37,10 +37,12 @@ The report's `qualification_passed` field refers only to this public sample chec
 It does not qualify an entry for the competition or prove live information coverage.
 The printed request counts are reads from saved responses, not network calls.
 
-## Next: research live companies
+## Optional: local batch experiments (not the submission entrypoint)
 
-Requires Python 3.11+ and `uv`. This step downloads data and makes live requests.
-The manifest selector can create a local test batch of any size. Use 100 rows for the recommended smoke test before trying a larger batch.
+Requires Python 3.11+ and `uv`. This workflow downloads data and makes live requests.
+It uses the lower-level batch runner for development experiments. For the reproducible
+submission command, use **One-command evaluation candidate** below; do not submit this
+multi-step workflow as the evaluator entrypoint.
 
 ```bash
 uv sync
@@ -77,30 +79,32 @@ uv run python scripts/run_competition_batch.py \
 uv run --with pytest pytest -q
 ```
 
-The published archive was clean-room verified on August 24, 2026: 104 tests and 5 subtests passed, followed by a one-company live BRREG smoke run with one terminal envelope, five requests and zero silent drops.
+The 100-row smoke is a local operational check only. It does not predict an official
+score or qualify an entry.
 
 Increase `--count` and `--expected-count` together for a larger local test. The 100-row smoke test above is practice only; Builderr supplies the companies for every official run.
 
-## One-command evaluation candidate
+## Submission entrypoint: one reproducible run command
 
 The submission runner keeps the official-record path and the robots-aware,
 registry-linked website crawl in the same reproducible invocation. It writes
 one contract envelope per input, a run report, and an inspectable static
 evidence browser. It works with the default locked install; the optional
-Scrapy crawler is used automatically only when installed. Use the same command
-shape for a Builderr-supplied fresh batch (replace the paths and count only):
+Scrapy crawler is used automatically only when installed.
 
-```bash
+Install the locked default environment once, then run this single command from the
+repository root. Replace the two input paths and expected count with the evaluator's
+supplied batch and plain-CSV registry snapshot; keep the runner and output flags intact.
+
+```text
 uv sync --locked
-uv run python scripts/run_signalpost_submission.py \
-  --organisations smoke-companies.jsonl \
-  --bulk brreg-enheter.csv \
-  --output out/submission-envelopes.jsonl \
-  --report out/submission-report.json \
-  --viewer out/submission-viewer.html \
-  --run-id smoke-submission-001 \
-  --expected-count 100
+uv run python scripts/run_signalpost_submission.py --organisations smoke-companies.jsonl --bulk brreg-enheter.csv --output out/submission-envelopes.jsonl --report out/submission-report.json --viewer out/submission-viewer.html --run-id smoke-submission-001 --expected-count 100 --out-dir out/smoke-submission-run
 ```
+
+The invocation above is a 100-row smoke example. The evaluator may supply a larger
+batch; set `--expected-count` to the actual number of supplied organisations. The runner
+processes every supplied organisation and warns if the configured count differs.
+The batch path may be JSON, JSONL, plain text, or CSV as documented below.
 
 For a refresh, pass the prior run's `--previous-profiles out/submission-run/profiles.jsonl`.
 Each envelope then includes the previous evidence references, a stable current
@@ -117,6 +121,14 @@ input order and rejects duplicates or malformed organisation numbers.
 This runner does not publish third-party platform data until its source-rights
 and exact-entity gates are qualified. A local score is a diagnostic only; it
 is not an official Builderr score or a qualification claim.
+
+The default submission path uses no language model, no paid API, and no user
+credential. Its expected paid third-party API cost is USD 0 per run. If Google
+Places is explicitly enabled with evaluator-provided credentials and approved
+rights, the report sets `third_party_cost_usd` to `null` and marks the cost as
+unknown until provider billing data is supplied; it will not falsely report
+zero. Actual network/runtime cost still depends on the supplied batch and
+evaluator environment.
 
 An exhausted local `out/nav-feed-snapshot.json.gz` cache is optional. When it
 is absent, unreadable, or partial, the runner records NAV as skipped and still
@@ -172,6 +184,8 @@ Submit a repository with:
 - pinned dependencies and reproducible setup;
 - a previous-snapshot input and material-change output;
 - a machine-readable run report with runtime, request count and third-party cost;
-- declared models, APIs, licences and source-rights assumptions.
+- declared models, APIs, licences and source-rights assumptions. The default
+  path uses no model or paid API; optional Google Places requires an
+  evaluator-provided key and explicit rights approval.
 
 Email the repository URL, run command, models/APIs and expected cost per 100-company run to `submit@builderr.ai`.

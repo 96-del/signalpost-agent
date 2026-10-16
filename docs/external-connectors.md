@@ -1,7 +1,12 @@
 # External discovery and sentiment
 
-External intelligence is now 55/100 in the revised competition rubric. Individual connectors remain
-quarantined until their data-rights and held-out gates pass; planned or experimental output earns zero.
+This document describes local connector research and validation gates; it does not define the
+competition rubric. The [Signalpost challenge page](https://builderr.ai/challenges/signalpost) is the
+source of truth. As checked on 2026-10-16, the official axes are recall and coverage (50), precision
+and evidence (30), synthesis (12), and UX (8), with qualification at 65/100 on an official run.
+
+Individual connectors remain quarantined until their data rights, exact-entity precision, freshness,
+and held-out behavior are demonstrated. Planned or experimental output is not evidence of score gain.
 
 ## Missing-website discovery
 
@@ -25,7 +30,7 @@ is [closed to new customers and scheduled to discontinue on 1 January 2027](http
 Serper and Tavily can be evaluated as declared alternatives only after their storage, source, and crawling
 rights are accepted for this use.
 
-Production discovery gate:
+Local production-readiness gate for a discovery connector (not a Builderr threshold):
 
 - at least 500 frozen organisations, including at least 200 verified site-exists positives, 150 hard
   parent/franchise/ambiguous negatives, and 100 no-site or unresolved cases;
@@ -54,7 +59,7 @@ before use. The larger NorBERT variant may be added only if it materially improv
 but the text is CC BY-NC 4.0 and is not the commercial POC corpus. No clean, native, human-labelled Norwegian
 company-news corpus with clear commercial reuse rights was found.
 
-POC sentiment gate:
+Local research gate for a sentiment connector (not a Builderr threshold):
 
 - at least 300 recent exact-company snippets, independently labelled and adjudicated, with positive,
   neutral, and negative support; include mixed items when the product intends to publish that class;

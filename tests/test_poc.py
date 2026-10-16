@@ -42,7 +42,7 @@ from scripts.run_brave_discovery import brave_search  # noqa: E402
 from scripts.run_annual_report_workforce_connector import extract_candidate, needs_ocr  # noqa: E402
 from scripts.normalize_google_maps_results import candidate_score  # noqa: E402
 from scripts.run_scrapy_websites import terminal_events_for_run  # noqa: E402
-from scripts.run_signalpost_submission import attach_company_site_evidence, attach_nav_evidence  # noqa: E402
+from scripts.run_signalpost_submission import attach_company_site_evidence, attach_nav_evidence, third_party_cost_report  # noqa: E402
 from scripts import run_competition_batch as competition_batch_runner  # noqa: E402
 from scripts.run_sentiment_model import MODEL_REVISION, normalize_generated_label  # noqa: E402
 from scripts.score_company_completeness import score_rows, summarize  # noqa: E402
@@ -72,6 +72,17 @@ class EvidenceTests(unittest.TestCase):
         self.assertNotEqual(record["value"], 0)
         self.assertTrue(record["source_url"])
         self.assertTrue(record["retrieved_at"])
+
+
+class SubmissionCostTests(unittest.TestCase):
+    def test_default_submission_reports_no_paid_api_cost(self):
+        self.assertEqual(third_party_cost_report(False), (0.0, "zero_paid_api_calls"))
+
+    def test_places_submission_does_not_invent_paid_api_cost(self):
+        self.assertEqual(
+            third_party_cost_report(True),
+            (None, "unknown_requires_provider_billing_data"),
+        )
 
     def test_available_zero_is_preserved(self):
         record = evidence("employees", "available", "official_registry_bulk", "https://example.test", value=0)
@@ -677,6 +688,18 @@ class SamplingTests(unittest.TestCase):
         row = normalize_row({"organisasjonsnummer": "923609016", "navn": "Example AS", "antallAnsatte": ""})
         self.assertIsNone(row["employees"])
         self.assertEqual(row["latest_submitted_accounts"], "")
+
+    def test_plain_registry_csv_accepts_bom_semicolon_and_spaced_org_number(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.csv"
+            with path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["organisasjonsnummer", "navn"], delimiter=";")
+                writer.writeheader()
+                writer.writerow({"organisasjonsnummer": "987 654 321", "navn": "Example AS"})
+            records = list(iter_bulk(path))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["organisation_number"], "987654321")
+        self.assertEqual(records[0]["name"], "Example AS")
 
     def test_fresh_website_audit_sample_excludes_poc_and_deduplicates_hosts(self):
         fields = ["organisasjonsnummer", "navn", "hjemmeside", "organisasjonsform.kode"]

@@ -1,30 +1,38 @@
-# Signalpost competition optimization loop
+# Signalpost optimization and release control
 
-The objective is a qualified external-first score of at least 80/100 on a frozen 1,000-company submission
-and a separate zero-overlap extension corpus. Registry financials are foundation data; verified external
-footprint, reviews, jobs, buzz and sentiment are the primary differentiator.
+The [published Signalpost challenge page](https://builderr.ai/challenges/signalpost) is the scoring and
+submission source of truth. As checked on 2026-10-16, qualification requires at least 65/100 on an
+official run. The four axes are recall and coverage (50), precision and evidence (30), synthesis (12),
+and UX (8). Builderr supplies fresh company batches; local scores and precomputed profiles are not the
+official result.
 
-The independent judge score is authoritative. A deterministic local scorer is only the fast feedback
-signal between independent reviews. It must never replace the hidden evaluation.
+The operational objective is therefore two-part: (1) finish the evaluator-supplied batch, returning one
+terminal envelope per input within the supplied resource budget; and (2) improve verified recall without
+publishing unsupported or wrong-company facts. Do not optimize against obsolete local rubrics or call a
+local smoke result a qualification score.
 
-## Loop
+## Evidence-led loop
 
-1. Measure qualification and the five subscores on frozen artifacts.
-2. Identify the largest score loss that can be changed without lowering exact-entity precision.
-3. Make one bounded change and add the regression that would catch its most dangerous failure.
-4. Rerun the same corpus. Keep the change only when it closes a hard gate or gains at least two proxy points.
-5. Rerun the zero-overlap extension corpus. A gain that disappears there is overfitting and is dropped.
-6. Request a fresh independent rescore only after a meaningful score/gate movement.
+1. Record the exact commit, locked install command, runner command, input batch digest, outputs, and run
+   report before changing the candidate.
+2. Use official evaluator feedback as the score authority. Use local tests only to diagnose specific
+   failure modes, not to predict a score.
+3. Choose one change tied to a measured loss or a reproducible operational defect. State the source,
+   rights, identity evidence, freshness rule, expected runtime/cost, and failure behavior first.
+4. Add a regression test for the highest-risk failure, then run the locked default install, test suite,
+   and bounded end-to-end batch.
+5. Keep a connector only if it adds independently verifiable facts on unseen companies without weakening
+   entity precision, source rights, or run completion. Otherwise leave it disabled.
+6. Freeze the exact commit before evaluation. Never change the code after sending its hash and call it the
+   same version.
 
-## Controller behavior
+## Stop conditions
 
-- Reinforce: qualification gate closes or same-corpus score rises by at least two without regressions.
-- Hold: improvement is under two points but supplies necessary infrastructure for the next measured gate.
-- Drop: two iterations produce under one point total, coverage rises by lowering precision, or the extension
-  corpus regresses materially.
-- Roll back immediately: wrong-company publication, fabricated financial claim, silent entity drop,
-  missing material evidence hash, prohibited request, or broken regression gate.
-
-The external-first baseline is 33.968/100 raw and zero awardable because no external observations have
-yet passed the new blind audit. The first experiments are Google Places, YouTube, licensed news/search,
-and jobs. Each begins on a 100-company development slice, then a zero-overlap validation slice.
+- Stop/roll back on a material wrong-company publication, fabricated or unsupported claim, missing input
+  envelope, prohibited request, unaccounted credential, or reproducible clean-install failure.
+- Do not publish a source snapshot unless its pagination is exhausted, its freshness is suitable for the
+  claim, and its reuse terms are satisfied.
+- Do not enable a connector solely because a local score suggests more coverage. Require exact-entity
+  evidence, rights review, bounded runtime, and test cases for collisions and missing data.
+- Treat `available`, `not_available`, `blocked`, `not_applicable`, `ambiguous`, and `failed` as distinct
+  outcomes. Missing information is not zero.
