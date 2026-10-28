@@ -9,10 +9,8 @@ from datetime import datetime, timezone
 # Install rapidfuzz for strict name matching as required by Phase 1b
 try:
     from rapidfuzz import fuzz
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "rapidfuzz"])
-    from rapidfuzz import fuzz
+except ImportError as exc:
+    raise RuntimeError("rapidfuzz is required; install the pinned project dependencies with uv sync") from exc
 
 BLOCKLIST_PATTERNS = [
     "linkedin.com/share", "linkedin.com/sharing", "facebook.com/sharer",

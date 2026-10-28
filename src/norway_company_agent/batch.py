@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 from .evidence import evidence, utc_now
 from .official import accounting_obligation_assessment
-from .sampling import iter_bulk
+from .sampling import iter_bulk_selected
 
 
 TERMINAL_STATES = {
@@ -151,8 +151,7 @@ def profiles_from_bulk(path: str | Path, organisation_numbers: Iterable[str]) ->
     retrieved_at = utc_now()
     found: dict[str, dict[str, Any]] = {}
     scanned = 0
-    for profile in iter_bulk(path):
-        scanned += 1
+    for scanned, profile in iter_bulk_selected(path, wanted):
         org = profile["organisation_number"]
         if org not in wanted:
             continue

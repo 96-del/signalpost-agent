@@ -88,7 +88,9 @@ def candidate_from_place(place: dict[str, Any]) -> dict[str, Any]:
 def fetch_company(profile: dict[str, Any], *, api_key: str, timeout: float = 20.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Resolve one place only when a pre-detail candidate has exact proof."""
     org = str(profile.get("organisation_number") or "")
+    requests_made = 0
     try:
+        requests_made += 1
         search, _ = request_json(
             SEARCH_URL,
             api_key=api_key,
@@ -99,7 +101,8 @@ def fetch_company(profile: dict[str, Any], *, api_key: str, timeout: float = 20.
         candidates = [candidate_from_place(item) for item in search.get("places") or []]
         prequalified = [item for item in candidates if item.get("place_id") and candidate_score(profile, item)["accepted"]]
         if len(prequalified) != 1:
-            return [], {"organisation_number": org, "status": "ambiguous_or_no_exact_candidate", "candidates": len(candidates), "prequalified": len(prequalified)}
+            return [], {"organisation_number": org, "status": "ambiguous_or_no_exact_candidate", "candidates": len(candidates), "prequalified": len(prequalified), "requests": requests_made}
+        requests_made += 1
         detail, _ = request_json(
             DETAIL_URL.format(place_id=urllib.parse.quote(str(prequalified[0]["place_id"]), safe="")),
             api_key=api_key,
@@ -108,7 +111,7 @@ def fetch_company(profile: dict[str, Any], *, api_key: str, timeout: float = 20.
         )
         candidate = candidate_from_place(detail)
         if not candidate_score(profile, candidate)["accepted"]:
-            return [], {"organisation_number": org, "status": "detail_identity_mismatch", "candidates": len(candidates)}
+            return [], {"organisation_number": org, "status": "detail_identity_mismatch", "candidates": len(candidates), "requests": requests_made}
         observations, match = normalize_company(profile, [candidate], utc_now())
         # normalize_company is shared with the experimental importer; promote
         # only this official API path and preserve its strict proof unchanged.
@@ -117,11 +120,11 @@ def fetch_company(profile: dict[str, Any], *, api_key: str, timeout: float = 20.
             observation["rights_status"] = "approved"
             observation["source_class"] = "licensed_places_api"
             observation["connector_version"] = "google_places_api_new_v1"
-        return observations, {"organisation_number": org, "status": "exact_match", "candidates": len(candidates), **match}
+        return observations, {"organisation_number": org, "status": "exact_match", "candidates": len(candidates), "requests": requests_made, **match}
     except urllib.error.HTTPError as exc:
-        return [], {"organisation_number": org, "status": "blocked" if exc.code in {401, 403, 429} else "failed", "http_status": exc.code}
+        return [], {"organisation_number": org, "status": "blocked" if exc.code in {401, 403, 429} else "failed", "http_status": exc.code, "requests": requests_made}
     except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
-        return [], {"organisation_number": org, "status": "failed", "error": type(exc).__name__}
+        return [], {"organisation_number": org, "status": "failed", "error": type(exc).__name__, "requests": requests_made}
 
 
 def run(profiles: list[dict[str, Any]], *, api_key: str, workers: int = 4, timeout: float = 20.0, budget_seconds: float = 600.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -162,6 +165,7 @@ def run(profiles: list[dict[str, Any]], *, api_key: str, workers: int = 4, timeo
         "status_counts": {key: sum(row.get("status") == key for row in statuses) for key in sorted({row.get("status") for row in statuses})},
         "elapsed_seconds": round(time.monotonic() - started, 2),
         "budget_seconds": budget_seconds,
+        "requests": sum(int(row.get("requests") or 0) for row in statuses),
         "company_results": statuses,
         "claim_boundary": "Places API (New), called with a server-side key only after source-rights approval. Exact legal name plus registered address, phone, or verified-domain proof is required before publication.",
     }

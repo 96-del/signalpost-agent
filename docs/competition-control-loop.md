@@ -6,6 +6,13 @@ official run. The four axes are recall and coverage (50), precision and evidence
 and UX (8). Builderr supplies fresh company batches; local scores and precomputed profiles are not the
 official result.
 
+An evaluator clarification received on 26 October 2026 confirmed that the
+evaluator passes an organisation-number file and, when required, the frozen
+registry file; the documented one-command runner must emit `OUTPUT_CONTRACT.md`
+envelopes. The participant-received limits are 45 minutes and 2,000 requests per
+100 companies, with public internet and no credentials. This clarification
+supplements the published contract; the original message remains the authority.
+
 The operational objective is therefore two-part: (1) finish the evaluator-supplied batch, returning one
 terminal envelope per input within the supplied resource budget; and (2) improve verified recall without
 publishing unsupported or wrong-company facts. Do not optimize against obsolete local rubrics or call a

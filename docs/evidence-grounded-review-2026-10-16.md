@@ -19,8 +19,10 @@ documentation are authoritative; local runs establish only what happened in this
 - NAV permits use of its job-ad API for display and analysis, but consumers must promptly remove/update
   inactive or changed ads and handle personal data lawfully with retention limits. Source:
   [NAV job-ad API terms](https://arbeidsplassen.nav.no/vilkar-api).
-- Public Nominatim is not a bulk lookup service: its policy sets an absolute maximum of one request per
-  second, recommends caching, and discourages periodic bulk geocoding. Source:
+- Public Nominatim is not suitable for recurring official batches: its policy treats periodic app
+  requests as bulk geocoding, strongly discourages that use, and restricts scripts run at regular
+  intervals to four requests per minute. A one-time local test must still be single-threaded, cached,
+  identified by a valid User-Agent and properly attributed. Source:
   [Nominatim usage policy](https://operations.osmfoundation.org/policies/nominatim/).
 - Similar registry/data systems reinforce a useful architecture distinction: entity lookup by a stable
   identifier is materially safer than loose name search. OpenCorporates documents deliberately loose

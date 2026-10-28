@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import math
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .refresh import diff_profile
 
@@ -32,7 +35,6 @@ def _json_safe(value: Any) -> Any:
         return {
             str(k): _json_safe(v)
             for k, v in value.items()
-            if k is not None
         }
 
     if isinstance(value, (list, tuple)):
@@ -94,7 +96,10 @@ def availability(status: Any) -> str:
         "not_applicable": "not_applicable",
         "blocked": "blocked",
         "not_found": "not_available",
-        "not_fetched": "not_available",
+        # An unattempted source is not proof that no information exists.
+        # `failed` is the honest terminal contract state unless the caller can
+        # establish that the field is genuinely not applicable.
+        "not_fetched": "failed",
         "source_error": "failed",
         "failed": "failed",
         "ambiguous": "ambiguous",
@@ -102,6 +107,183 @@ def availability(status: Any) -> str:
 
 
 map_availability = availability
+
+
+def validate_output_envelopes(
+    envelopes: list[dict[str, Any]],
+    expected_organisation_numbers: list[str],
+) -> dict[str, Any]:
+    """Validate the submission payload, not just its row count.
+
+    This deliberately validates relationships between claims and evidence as
+    well as required envelope sections. A syntactically valid JSONL file can
+    still be unscoreable if its citations dangle or its entity IDs drift.
+    """
+    errors: list[dict[str, str]] = []
+    expected = [str(value) for value in expected_organisation_numbers]
+    actual = [str(item.get("organisation_number") or "") if isinstance(item, dict) else "" for item in envelopes]
+    allowed_terminal_runs = {"completed", "completed_with_errors"}
+
+    def fail(index: int, path: str, reason: str) -> None:
+        org = actual[index] if index < len(actual) else ""
+        errors.append({"organisation_number": org, "path": path, "reason": reason})
+
+    for index, row in enumerate(envelopes):
+        if not isinstance(row, dict):
+            fail(index, "$", "envelope is not an object")
+            continue
+        required = {
+            "organisation_number", "legal_identity", "public_brand", "run",
+            "claims", "evidence", "source_snapshots", "refresh", "changes",
+            "errors", "operations",
+        }
+        missing = sorted(required - row.keys())
+        if missing:
+            fail(index, "$", f"missing required sections: {', '.join(missing)}")
+        org = str(row.get("organisation_number") or "")
+        if not re.fullmatch(r"\d{9}", org):
+            fail(index, "organisation_number", "must be exactly nine digits")
+        legal = row.get("legal_identity")
+        if not isinstance(legal, dict) or str(legal.get("organisation_number") or "") != org:
+            fail(index, "legal_identity.organisation_number", "must match the envelope organisation number")
+
+        run = row.get("run")
+        if not isinstance(run, dict):
+            fail(index, "run", "must be an object")
+            run = {}
+        if run.get("terminal_status") not in allowed_terminal_runs:
+            fail(index, "run.terminal_status", "must be a completed terminal status")
+        parsed_times: dict[str, datetime] = {}
+        for field in ("started_at", "completed_at"):
+            raw = run.get(field)
+            try:
+                parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    raise ValueError("timezone missing")
+                parsed_times[field] = parsed
+            except (TypeError, ValueError):
+                fail(index, f"run.{field}", "must be an ISO-8601 timestamp with timezone")
+        if len(parsed_times) == 2 and parsed_times["completed_at"] < parsed_times["started_at"]:
+            fail(index, "run.completed_at", "must not precede started_at")
+
+        raw_evidence = row.get("evidence")
+        evidence_rows = raw_evidence if isinstance(raw_evidence, list) else []
+        if not isinstance(raw_evidence, list):
+            fail(index, "evidence", "must be an array")
+        evidence_by_id: dict[str, dict[str, Any]] = {}
+        for evidence_index, item in enumerate(evidence_rows):
+            path = f"evidence[{evidence_index}]"
+            if not isinstance(item, dict):
+                fail(index, path, "must be an object")
+                continue
+            evidence_id = str(item.get("id") or "")
+            if not evidence_id or evidence_id in evidence_by_id:
+                fail(index, f"{path}.id", "must be nonempty and unique within the envelope")
+            else:
+                evidence_by_id[evidence_id] = item
+            raw_url = str(item.get("source_url") or "")
+            try:
+                parsed_url = urlparse(raw_url)
+                url_host = parsed_url.hostname
+            except ValueError:
+                parsed_url = None
+                url_host = None
+                fail(index, f"{path}.source_url", "must be a valid public HTTP(S) source URL")
+            if parsed_url is not None and (parsed_url.scheme not in {"http", "https"} or not url_host):
+                fail(index, f"{path}.source_url", "must be a public HTTP(S) source URL")
+            elif parsed_url is not None and (parsed_url.username is not None or parsed_url.password is not None):
+                fail(index, f"{path}.source_url", "must not embed credentials")
+            elif parsed_url is not None and (url_host.casefold().rstrip(".") == "localhost" or url_host.casefold().endswith((".localhost", ".local"))):
+                fail(index, f"{path}.source_url", "must not reference a local host")
+            elif parsed_url is not None:
+                try:
+                    ip_address = ipaddress.ip_address(url_host)
+                except ValueError:
+                    ip_address = None
+                if ip_address is not None and not ip_address.is_global:
+                    fail(index, f"{path}.source_url", "must not reference a private or reserved address")
+            if not item.get("source_class"):
+                fail(index, f"{path}.source_class", "must identify the source class")
+            if not item.get("extraction_method"):
+                fail(index, f"{path}.extraction_method", "must identify the extraction method")
+            if not item.get("claim_span"):
+                fail(index, f"{path}.claim_span", "must retain a source span or an explicit absence/error note")
+            if "content_sha256" not in item:
+                fail(index, f"{path}.content_sha256", "must be present; use null only when no source bytes exist")
+            retrieved = item.get("retrieved_at")
+            try:
+                parsed = datetime.fromisoformat(str(retrieved).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    raise ValueError("timezone missing")
+                if "completed_at" in parsed_times and parsed > parsed_times["completed_at"]:
+                    fail(index, f"{path}.retrieved_at", "must not be later than the envelope completion time")
+            except (TypeError, ValueError):
+                fail(index, f"{path}.retrieved_at", "must be an ISO-8601 timestamp with timezone")
+            digest = item.get("content_sha256")
+            if digest is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", str(digest)):
+                fail(index, f"{path}.content_sha256", "must be a SHA-256 hex digest or null when no source bytes exist")
+
+        raw_claims = row.get("claims")
+        claims = raw_claims if isinstance(raw_claims, list) else []
+        if not isinstance(raw_claims, list):
+            fail(index, "claims", "must be an array")
+        seen_fields: set[str] = set()
+        for claim_index, claim in enumerate(claims):
+            path = f"claims[{claim_index}]"
+            if not isinstance(claim, dict):
+                fail(index, path, "must be an object")
+                continue
+            field = str(claim.get("field") or "")
+            if not field or field in seen_fields:
+                fail(index, f"{path}.field", "must be nonempty and unique within the envelope")
+            seen_fields.add(field)
+            if claim.get("availability") not in AVAILABILITY:
+                fail(index, f"{path}.availability", "is not an allowed OUTPUT_CONTRACT state")
+            confidence = claim.get("confidence")
+            if not isinstance(confidence, (int, float)) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+                fail(index, f"{path}.confidence", "must be a finite number from 0 to 1")
+            references = claim.get("evidence_ids")
+            if not isinstance(references, list):
+                fail(index, f"{path}.evidence_ids", "must be an array")
+                references = []
+            for reference in references:
+                if reference not in evidence_by_id:
+                    fail(index, f"{path}.evidence_ids", f"references missing evidence id {reference!r}")
+            if field in {"financials", "financial_history"} and claim.get("availability") == "available":
+                value = claim.get("value")
+                period_items = value.get("records" if field == "financials" else "years") if isinstance(value, dict) else None
+                if period_items and any(
+                    not evidence_by_id.get(str(reference), {}).get("reporting_period")
+                    for reference in references
+                ):
+                    fail(index, path, "available financial claims require an evidence reporting_period")
+            if claim.get("availability") == "available" and (claim.get("value") is None or not references):
+                fail(index, path, "available claims require a non-null value and supporting evidence")
+
+        brand = row.get("public_brand")
+        if not isinstance(brand, dict) or not isinstance(brand.get("verified"), bool):
+            fail(index, "public_brand", "must report an explicit verified boolean")
+        elif brand["verified"]:
+            brand_evidence = evidence_by_id.get(str(brand.get("evidence_id") or ""))
+            website_claim = next((claim for claim in claims if isinstance(claim, dict) and claim.get("field") == "website"), None)
+            site_value = (website_claim or {}).get("value") or {}
+            assessment = site_value.get("identity_assessment") if isinstance(site_value, dict) else None
+            if not brand.get("name") or not brand.get("website_url") or not brand_evidence or not isinstance(assessment, dict) or assessment.get("publishable") is not True:
+                fail(index, "public_brand", "verified brand must link to positively identity-gated website evidence")
+
+        try:
+            json.dumps(row, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError):
+            fail(index, "$", "must be strict JSON without NaN or unsupported values")
+
+    checks = {
+        "nonempty_input_batch": bool(expected),
+        "one_envelope_per_input": len(envelopes) == len(expected),
+        "unique_organisation_numbers": len(actual) == len(set(actual)),
+        "input_order_preserved": actual == expected,
+        "envelope_contract_valid": not errors,
+    }
+    return {"passed": all(checks.values()), "checks": checks, "error_count": len(errors), "errors": errors[:50]}
 
 
 def _span(record: dict[str, Any]) -> str | None:
@@ -118,6 +300,40 @@ def _span(record: dict[str, Any]) -> str | None:
         return value[:1000]
 
     return _dumps(value)[:1000]
+
+
+def _reporting_period(record: dict[str, Any], field: str) -> str | None:
+    """Expose the actual filing/publication period when the source has one."""
+    explicit = record.get("as_of") or record.get("effective_at")
+    if explicit:
+        return str(explicit)
+    value = record.get("value")
+    if not isinstance(value, dict):
+        return None
+    if field == "financials":
+        records = value.get("records") or []
+        if not records:
+            return None
+        periods = []
+        for row in records:
+            if not isinstance(row, dict):
+                return None
+            period = row.get("period")
+            if not isinstance(period, dict):
+                return None
+            start = period.get("fraDato") or period.get("from") or period.get("start")
+            end = period.get("tilDato") or period.get("to") or period.get("end")
+            if not start or not end:
+                return None
+            periods.append(f"{start}/{end}")
+        return "; ".join(sorted(set(periods)))
+    if field == "financial_history":
+        years = value.get("years") or [
+            item.get("year") for item in value.get("pdfs") or [] if isinstance(item, dict)
+        ]
+        normalized = sorted({str(year) for year in years if year is not None})
+        return ", ".join(normalized) or None
+    return None
 
 
 def profile_to_contract(
@@ -176,8 +392,8 @@ def profile_to_contract(
                     or "unknown"
                 ),
                 "retrieved_at": record.get("retrieved_at") or "",
-                "reporting_period": record.get("as_of") or record.get("effective_at"),
-                "extraction_method": record.get("source_type") or record.get("source_class") or "unknown",
+                "reporting_period": _reporting_period(record, field),
+                "extraction_method": record.get("extraction_method") or record.get("source_type") or record.get("source_class") or "unknown",
                 "content_sha256": record.get("content_sha256"),
                 "claim_span": _span(record),
             }
@@ -199,7 +415,7 @@ def profile_to_contract(
             else:
                 assessment = {}
 
-            if assessment and not assessment.get("publishable"):
+            if assessment.get("publishable") is not True:
                 state = "ambiguous"
                 claim_value = {
                     "candidate_url": record.get("source_url"),
@@ -207,7 +423,7 @@ def profile_to_contract(
                     "identity_method": assessment.get("method"),
                     "note": (
                         "Registry-linked website captured but not "
-                        "attributed to this legal entity."
+                        "positively attributed to this legal entity."
                     ),
                 }
 
@@ -246,6 +462,12 @@ def profile_to_contract(
 
     website = profile_evidence.get("website") or {}
     website_value = website.get("value") or {}
+    website_identity = website_value.get("identity_assessment") if isinstance(website_value, dict) else None
+    verified_website = (
+        website.get("status") == "available"
+        and isinstance(website_identity, dict)
+        and website_identity.get("publishable") is True
+    )
 
     if registry.get("status") == "available":
         name = (
@@ -265,7 +487,7 @@ def profile_to_contract(
             )
             description = (
                 website_value.get("description")
-                if identity_assessment.get("publishable", True)
+                if identity_assessment.get("publishable") is True
                 else None
             )
         else:
@@ -304,7 +526,7 @@ def profile_to_contract(
             unknown.append(
                 "No verified filing-year history was returned in this run."
             )
-        if (website_evidence.get("status") or "not_available") not in {"available"}:
+        if not verified_website:
             unknown.append(
                 "No verified company website was attributed to this legal entity in this run."
             )
@@ -353,6 +575,7 @@ def profile_to_contract(
                 "website",
                 "financials",
             }
+            and (key != "website" or verified_website)
             and (profile_evidence.get(key) or {}).get("status") == "available"
         ]
 
@@ -449,16 +672,18 @@ def profile_to_contract(
                 "field": str(field),
                 "source_url": record.get("source_url") or "",
                 "retrieved_at": record.get("retrieved_at") or "",
-                "reporting_period": record.get("as_of") or record.get("effective_at"),
+                "reporting_period": _reporting_period(record, str(field)),
                 "content_sha256": record.get("content_sha256"),
                 "source_class": record.get("source_class") or record.get("source_type") or "unknown",
+                "extraction_method": record.get("extraction_method") or record.get("source_type") or record.get("source_class") or "unknown",
+                "claim_span": _span(record),
             })
         return references
 
     current_snapshots = snapshot_references(profile)
     previous_snapshots = snapshot_references(previous_profile)
     stable_snapshot = lambda refs: [
-        {key: value for key, value in item.items() if key != "retrieved_at"}
+        {key: value for key, value in item.items() if key not in {"retrieved_at", "claim_span"}}
         for item in refs
     ]
     current_snapshot_id = _stable("snapshot", stable_snapshot(current_snapshots))

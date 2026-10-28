@@ -19,6 +19,34 @@ from norway_company_agent.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.website import fetch_website  # noqa: E402
 
 
+def accumulate_operations(operations: dict, metric: dict | None) -> None:
+    """Add one profile's measured work to the batch totals, including resumed rows."""
+    metric = metric if isinstance(metric, dict) else {}
+    operations["requests"] += int(metric.get("requests") or 0)
+    operations["bytes"] += int(metric.get("bytes") or 0)
+    if metric.get("request_count_complete") is False:
+        operations["request_count_complete"] = False
+    latencies = metric.get("latencies_ms") or []
+    if isinstance(latencies, list):
+        operations["latencies_ms"].extend(value for value in latencies if isinstance(value, (int, float)))
+
+
+def resume_profile_matches(
+    profile: dict,
+    *,
+    run_id: str,
+    registry_snapshot_sha256: str,
+    requested_modules: list[str],
+) -> bool:
+    """Only reuse a checkpoint made for this exact run, registry and module set."""
+    return (
+        profile.get("_submission_run_id") == run_id
+        and profile.get("_registry_snapshot_sha256") == registry_snapshot_sha256
+        and profile.get("_requested_modules") == requested_modules
+        and profile_complete_for_modules(profile, requested_modules)
+    )
+
+
 def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -57,7 +85,7 @@ def main() -> None:
                 profile[key] = annotations[profile["organisation_number"]][key]
     requested_modules = [item.strip() for item in args.modules.split(",") if item.strip()]
     fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "website"}
-    operations = {"requests": 0, "bytes": 0, "latencies_ms": []}
+    operations = {"requests": 0, "bytes": 0, "latencies_ms": [], "request_count_complete": True}
 
     def enrich(profile: dict) -> tuple[dict, dict]:
         records, metrics = fetch_official_modules(profile["organisation_number"], fetch_modules)
@@ -67,11 +95,14 @@ def main() -> None:
             website_record, website_metrics = fetch_website(profile.get("website"))
             profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
         metric = {
-            "requests": len(metrics) + website_metrics["requests"],
+            "requests": sum(item.request_attempts for item in metrics) + website_metrics["requests"],
             "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"],
             "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"],
         }
         profile["run_metrics"] = metric
+        profile["_submission_run_id"] = args.run_id
+        profile["_registry_snapshot_sha256"] = registry_metadata["registry_snapshot_sha256"]
+        profile["_requested_modules"] = requested_modules
         return profile, metric
 
     def failed_enrichment(profile: dict, exc: Exception) -> tuple[dict, dict]:
@@ -87,8 +118,13 @@ def main() -> None:
                 "website",
                 evidence("website", "source_error", "registry_linked_company_website", "https://data.brreg.no/enhetsregisteret/api/enheter", note=note),
             )
-        metric = {"requests": 0, "bytes": 0, "latencies_ms": []}
+        # The exception may have happened after one or more HTTP attempts.
+        # Do not misreport those unknown attempts as a measured zero.
+        metric = {"requests": 0, "bytes": 0, "latencies_ms": [], "request_count_complete": False}
         profile["run_metrics"] = metric
+        profile["_submission_run_id"] = args.run_id
+        profile["_registry_snapshot_sha256"] = registry_metadata["registry_snapshot_sha256"]
+        profile["_requested_modules"] = requested_modules
         return profile, metric
 
     state: dict[str, dict] = {}
@@ -96,14 +132,24 @@ def main() -> None:
     profiles_output = Path(args.profiles_output)
     if args.resume and profiles_output.exists():
         prior = [json.loads(line) for line in profiles_output.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if not set(item["organisation_number"] for item in prior).issubset(set(orgs)):
+        prior_orgs = [str(item.get("organisation_number") or "") for item in prior]
+        if len(prior_orgs) != len(set(prior_orgs)):
+            raise SystemExit("Resume profile file contains duplicate organisation numbers")
+        if not set(prior_orgs).issubset(set(orgs)):
             raise SystemExit("Resume profile membership is not a subset of this batch")
         state = {
             item["organisation_number"]: item
             for item in prior
-            if profile_complete_for_modules(item, requested_modules)
+            if resume_profile_matches(
+                item,
+                run_id=args.run_id,
+                registry_snapshot_sha256=registry_metadata["registry_snapshot_sha256"],
+                requested_modules=requested_modules,
+            )
         }
         resumed_profiles = len(state)
+        for profile in state.values():
+            accumulate_operations(operations, profile.get("run_metrics"))
     pending_profiles = [profile for profile in profiles if profile["organisation_number"] not in state]
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(enrich, profile): profile["organisation_number"] for profile in pending_profiles}
@@ -115,9 +161,7 @@ def main() -> None:
                 original = next(item for item in pending_profiles if item["organisation_number"] == org)
                 profile, metric = failed_enrichment(original, exc)
             state[profile["organisation_number"]] = profile
-            operations["requests"] += metric["requests"]
-            operations["bytes"] += metric["bytes"]
-            operations["latencies_ms"].extend(metric["latencies_ms"])
+            accumulate_operations(operations, metric)
             if index % args.checkpoint_every == 0 or index == len(pending_profiles):
                 checkpoint = [state[org] for org in orgs if org in state]
                 write_jsonl(profiles_output, checkpoint)

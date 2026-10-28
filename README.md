@@ -106,10 +106,17 @@ batch; set `--expected-count` to the actual number of supplied organisations. Th
 processes every supplied organisation and warns if the configured count differs.
 The batch path may be JSON, JSONL, plain text, or CSV as documented below.
 
-For a refresh, pass the prior run's `--previous-profiles out/submission-run/profiles.jsonl`.
-Each envelope then includes the previous evidence references, a stable current
-snapshot ID, and material changes. Without prior profiles, the envelope marks
-the run as an initial snapshot.
+For a refresh, reuse the same `--out-dir`; before replacing its intermediate
+`profiles.jsonl`, the runner loads it as the prior raw snapshot. You can instead
+pass `--previous-profiles PATH` to use a snapshot stored elsewhere. Each envelope
+then includes previous evidence references, a stable current snapshot ID, and
+material changes. Without a prior snapshot, the envelope marks the run as an
+initial snapshot.
+
+Each invocation has its own crawler event log and resume directory, so a later
+refresh checks sources again instead of treating old crawl events as current.
+Use a new `--run-id` for each official batch to keep the run report traceable;
+reusing an output directory is supported for prior-profile comparison.
 
 `--bulk` accepts the evaluator's documented **plain CSV** registry snapshot
 and local gzip snapshots. The reader detects the file contents, rather than
@@ -133,13 +140,36 @@ evaluator environment.
 An exhausted local `out/nav-feed-snapshot.json.gz` cache is optional. When it
 is absent, unreadable, or partial, the runner records NAV as skipped and still
 returns the required result for every supplied company. It never publishes a
-NAV job claim unless the cache is exhausted and the employer identity matches
-exactly.
+NAV job claim unless the cache is exhausted and the normalized employer legal
+name matches exactly in the same municipality, with duplicate legal names
+quarantined using the supplied Brreg snapshot. The NAV feed contains no
+organisation number, so the snapshot retrieval time is exposed as the claim's
+`as_of` period; near-name and token-reordered matches are not published.
 
-The OSM connector is also opt-in (`--enable-osm`) because its public 1 Hz
-service can consume a material share of a fixed evaluator time budget. Its
-absence is reported as `not_run`; it never prevents an envelope from being
-returned.
+The public Nominatim connector is not part of the official submission runner.
+The Nominatim policy treats periodic app requests as bulk geocoding and
+restricts regularly repeated scripts to 4 requests per minute; the connector's
+1-second pacing is suitable only for a one-time local research run, not the
+recurring official batches. If you run that standalone experiment, cache its
+results and display required OpenStreetMap attribution and ODbL information.
+The official run reports OSM as `not_run` and never depends on it to return an
+envelope. See the [Nominatim usage policy](https://operations.osmfoundation.org/policies/nominatim/)
+and [OpenStreetMap copyright and licence](https://www.openstreetmap.org/copyright).
+
+Company-site publishing is deliberately stricter than page discovery. The
+registry group response is checked for a parent root; if the homepage title or
+description identifies that parent, the site and its social links are
+quarantined for the child company. A page is emitted as company-site news only
+when it is an individual dated post with explicit publication metadata and
+substantive article text. `dateModified`, generic “updated” dates, section
+labels and undated product/navigation pages do not qualify. See
+[`docs/external-connectors.md`](docs/external-connectors.md) for the evidence
+rules.
+
+The runner report includes an operational budget check. Defaults are 45 minutes
+and 2,000 HTTP requests per 100 supplied companies, matching evaluator guidance
+received on 26 October 2026. A local pass is a preflight result, not
+an official score or a guarantee for a different batch.
 
 For broader, permitted external recall, it can optionally call **Google Places
 API (New)**. This requires an evaluator-provided `GOOGLE_PLACES_API_KEY` and a
@@ -187,5 +217,8 @@ Submit a repository with:
 - declared models, APIs, licences and source-rights assumptions. The default
   path uses no model or paid API; optional Google Places requires an
   evaluator-provided key and explicit rights approval.
+- an agent display name and a contact address for result notifications.
 
-Email the repository URL, run command, models/APIs and expected cost per 100-company run to `submit@builderr.ai`.
+Email the agent name, contact address, public repository URL, exact commit hash,
+100-company smoke-test report, one reproducible run command, models/APIs/licences,
+source-rights assumptions and expected cost per official batch to `submit@builderr.ai`.

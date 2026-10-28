@@ -7,16 +7,29 @@ TRACKED_FIELDS: dict[str, tuple[str, ...]] = {
     "registry.name": ("name",),
     "registry.legal_form": ("legal_form",),
     "registry.employees": ("employees",),
+    "registry.bankrupt": ("bankrupt",),
+    "registry.liquidating": ("liquidating",),
     "registry.municipality": ("municipality",),
+    "registry.municipality_number": ("municipality_number",),
+    "registry.industry_code": ("industry_code",),
+    "registry.industry_label": ("industry_label",),
     "registry.website": ("website",),
     "registry.latest_submitted_accounts": ("latest_submitted_accounts",),
+    "registry_live.business_address": ("evidence", "registry_live", "value", "business_address"),
+    "registry_live.postal_address": ("evidence", "registry_live", "value", "postal_address"),
+    "accounting_obligation.classification": ("evidence", "accounting_obligation", "value", "classification"),
     "financials.records": ("evidence", "financials", "value", "records"),
     "financial_history.years": ("evidence", "financial_history", "value", "years"),
     "roles.roles": ("evidence", "roles", "value", "roles"),
     "locations.locations": ("evidence", "locations", "value", "locations"),
+    "group.structure": ("evidence", "group", "value"),
     "website.title": ("evidence", "website", "value", "title"),
     "website.description": ("evidence", "website", "value", "description"),
     "website.social_links": ("evidence", "website", "value", "social_links"),
+    "workforce_jobs.active_job_count": ("evidence", "workforce_jobs", "value", "active_job_count"),
+    "workforce_jobs.job_titles": ("evidence", "workforce_jobs", "value", "job_titles"),
+    "company_site_surface.metrics": ("evidence", "company_site_surface", "value", "metrics"),
+    "company_site_activity.metrics": ("evidence", "company_site_activity", "value", "metrics"),
 }
 
 
@@ -52,6 +65,12 @@ def diff_profile(previous: dict[str, Any], current: dict[str, Any]) -> list[dict
             # A transient collection failure is missing evidence, not proof that
             # the previously observed fact was removed or changed.
             continue
+        if field.startswith("website."):
+            assessment = _read(current, ("evidence", "website", "value", "identity_assessment")) or {}
+            if assessment.get("publishable") is not True:
+                # Do not describe a related or unverified candidate site as a
+                # material change to the target legal entity.
+                continue
         previous_record = _evidence_for(previous, field)
         changes.append({
             "organisation_number": new_org,

@@ -2,11 +2,31 @@
 
 This document describes local connector research and validation gates; it does not define the
 competition rubric. The [Signalpost challenge page](https://builderr.ai/challenges/signalpost) is the
-source of truth. As checked on 2026-10-16, the official axes are recall and coverage (50), precision
+source of truth. As checked on 2026-10-27, the official axes are recall and coverage (50), precision
 and evidence (30), synthesis (12), and UX (8), with qualification at 65/100 on an official run.
 
 Individual connectors remain quarantined until their data rights, exact-entity precision, freshness,
 and held-out behavior are demonstrated. Planned or experimental output is not evidence of score gain.
+
+## Company-owned website and news publication
+
+The official entity/group data is the ownership anchor. If the group response names a different
+parent organisation and the registry-listed homepage title or description identifies that parent,
+the homepage is treated as a group site for the child: its social accounts and company-site activity
+are withheld. A legal-name mention on a separate contact or directory page is not enough to override
+that decision. When ownership is uncertain, keep the raw crawl evidence but do not publish its
+external identity or activity claims under the child company.
+
+Company-site news is emitted only from an individual article-like URL beneath a news/press/blog
+section when the page has a non-generic title, substantive extracted article text, and an explicit
+publication date. Accepted date evidence is `article:published_time`, `datePublished`, or an
+equivalent explicitly named publication field. Generic `<time>` values, `dateModified`, feed update
+times and `lastmod` are not publication evidence. A section page, menu label, undated page or
+product page remains a website page, not a news observation. Company-owned posts are never labeled
+independent sentiment.
+
+These gates were added after the evaluator's 26 October audit note; they are quality safeguards, not
+a claim that every site or article has been independently adjudicated.
 
 ## Missing-website discovery
 

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Time-capped OSM Nominatim enrichment with graceful degradation.
+"""One-time local OSM Nominatim research with graceful degradation.
 
 Wraps the existing Nominatim lookup in a global time budget. When budget
 is exhausted, remaining companies get availability "blocked" (not "failed")
 with a clear note — the evaluator never crashes or hangs.
+
+Do not use this standalone script for recurring official evaluation runs.
+Public Nominatim treats periodic app requests as bulk geocoding and restricts
+scripts run at regular intervals to four requests per minute.
 
 Architecture:
   - Global time budget (default 300s = 5 min for 1000 companies)
@@ -31,10 +35,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 try:
     from rapidfuzz import fuzz
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "rapidfuzz"])
-    from rapidfuzz import fuzz
+except ImportError as exc:
+    raise RuntimeError("rapidfuzz is required; install the pinned project dependencies with uv sync") from exc
 
 log = logging.getLogger("osm_places")
 
@@ -120,6 +122,7 @@ def run_time_capped_osm(
     skipped = 0
     no_match = 0
     errors = 0
+    requests = 0
     last_request = 0.0
 
     ledger_entries: list[dict[str, Any]] = []
@@ -177,6 +180,7 @@ def run_time_capped_osm(
             })
             blocked += 1
             continue
+        requests += 1
         result = nominatim_lookup(name, municipality, timeout=min(5.0, remaining))
 
         if result is None:
@@ -289,6 +293,7 @@ def run_time_capped_osm(
         "blocked": blocked,
         "skipped": skipped,
         "errors": errors,
+        "requests": requests,
         "elapsed_seconds": round(elapsed, 1),
         "budget_seconds": budget_seconds,
         "budget_exhausted": blocked > 0,
@@ -348,8 +353,9 @@ def main() -> None:
     report = {
         "connector": "osm_nominatim_places_identity_v1",
         **metadata,
+        "usage_scope": "one-time local research only; not for recurring official evaluation batches",
         "claim_boundary": (
-            "OSM Nominatim free API with 1s rate limit; "
+            "OSM Nominatim public API; one-second pacing is for a one-time local research run only; "
             f"RapidFuzz name gate at threshold {args.threshold}; "
             f"time budget {args.budget}s — companies beyond budget get 'blocked' not 'failed'."
         ),

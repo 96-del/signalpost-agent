@@ -32,6 +32,39 @@ def _structured_names(value: Any) -> list[str]:
     return names
 
 
+def _registry_parent_name(profile: dict[str, Any]) -> str | None:
+    """Read the official group root only when it differs from the requested entity."""
+    group = (profile.get("evidence") or {}).get("group") or {}
+    value = group.get("value") or {}
+    if group.get("status") != "available" or not isinstance(value, dict):
+        return None
+    root_number = re.sub(r"\D", "", str(value.get("organisasjonsnummer") or ""))
+    target_number = re.sub(r"\D", "", str(profile.get("organisation_number") or ""))
+    root_name = str(value.get("navn") or "").strip()
+    if root_number and target_number and root_number != target_number and root_name:
+        return root_name
+
+    def find_parent(node: Any) -> str | None:
+        if isinstance(node, dict):
+            child_number = re.sub(r"\D", "", str(node.get("organisasjonsnummer") or ""))
+            parent_number = re.sub(r"\D", "", str(node.get("parentOrganisasjonsnummer") or ""))
+            parent_name = str(node.get("parentNavn") or "").strip()
+            if target_number and child_number == target_number and parent_number and parent_number != target_number and parent_name:
+                return parent_name
+            for child in node.values():
+                found = find_parent(child)
+                if found:
+                    return found
+        elif isinstance(node, list):
+            for child in node:
+                found = find_parent(child)
+                if found:
+                    return found
+        return None
+
+    return find_parent(value)
+
+
 def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     website = profile.get("evidence", {}).get("website", {})
     value = website.get("value") or {}
@@ -69,8 +102,17 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     homepage_token_sets = [set(_tokens(part)) for part in homepage_identity_parts if part]
     exact_homepage_name = bool(core and any(set(core).issubset(tokens) for tokens in homepage_token_sets))
     substantive_homepage = len(str(value.get("main_text_excerpt") or "").strip()) >= 100
+    parent_name = _registry_parent_name(profile)
+    parent_tokens = set(_tokens(parent_name))
+    homepage_identity = [
+        value.get("title"), value.get("description"), value.get("identity_text_excerpt"), *structured_names,
+    ]
+    parent_site_match = bool(parent_tokens and any(parent_tokens.issubset(set(_tokens(part))) for part in homepage_identity if part))
     is_business_sports_club = bool(re.search(r"(?:^|\s)B\.?\s*I\.?\s*L\.?(?:\s|$)", str(profile.get("name") or ""), re.I))
-    if any(marker in normalized_raw for marker in parked_markers):
+    if parent_site_match:
+        score = 0.1
+        reasons.append(f"homepage title/description identifies the official group parent ({parent_name}), not a verified standalone site for this entity")
+    elif any(marker in normalized_raw for marker in parked_markers):
         score = 0.1
         reasons.append("captured page is a parked, for-sale, or generic hosting placeholder")
     elif is_business_sports_club and "bedriftsidrett" not in normalized_candidate_text and "b i l" not in normalized_candidate_text:
@@ -82,9 +124,13 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     elif len(core) >= 2 and exact_homepage_name:
         score = 0.95
         reasons.append("all normalized legal-name tokens appear together in homepage identity evidence")
-    elif len(core) == 1 and exact_homepage_name and substantive_homepage:
+    elif len(core) == 1 and exact_homepage_name and substantive_homepage and any(
+        set(core).issubset(set(_tokens(part)))
+        for part in [value.get("identity_text_excerpt"), *structured_names]
+        if part
+    ):
         score = 0.95
-        reasons.append("single distinctive legal-name token appears in homepage identity evidence with substantive content")
+        reasons.append("single distinctive legal-name token appears in homepage legal/structured identity evidence with substantive content")
     elif ratio >= 0.75 and len(overlap) >= 2:
         score = 0.85
         reasons.append("most legal-name tokens appear, but exact identity is incomplete")

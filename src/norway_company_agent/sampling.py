@@ -187,6 +187,53 @@ def iter_bulk(path: str | Path) -> Iterable[dict[str, Any]]:
                 yield record
 
 
+def iter_bulk_selected(path: str | Path, organisation_numbers: Iterable[str]) -> Iterable[tuple[int, dict[str, Any]]]:
+    """Scan the registry snapshot cheaply, normalizing full rows only for requested IDs.
+
+    The official runner often needs a few hundred IDs from a million-row snapshot.
+    `DictReader` plus full profile normalization on every unrelated row needlessly
+    dominates the evaluator's fixed wall-clock budget.
+    """
+    wanted = {"".join(ch for ch in str(org) if ch.isdigit()) for org in organisation_numbers}
+    wanted.discard("")
+    if not wanted:
+        return
+    source = Path(path)
+    with source.open("rb") as raw:
+        is_gzip = raw.read(2) == b"\x1f\x8b"
+    opener = gzip.open if is_gzip else open
+    with opener(source, "rt", encoding="utf-8-sig", newline="") as handle:
+        sample = handle.read(8192)
+        handle.seek(0)
+        if not sample.strip():
+            raise ValueError(f"Registry snapshot is empty: {source}")
+        dialect = csv.Sniffer().sniff(sample, delimiters=";,\t")
+        reader = csv.reader(handle, dialect=dialect)
+        try:
+            headers = next(reader)
+        except StopIteration:
+            return
+        normalized_headers = ["".join(ch for ch in str(header).casefold() if ch.isalnum()) for header in headers]
+        org_index = next((
+            index for index, header in enumerate(normalized_headers)
+            if header in {"organisasjonsnummer", "organisationnumber", "organizationnumber", "orgnr"}
+        ), None)
+        if org_index is None:
+            raise ValueError(f"Registry snapshot has no recognized organisation-number column: {source}")
+        scanned = 0
+        for row in reader:
+            if org_index >= len(row):
+                continue
+            org = "".join(ch for ch in row[org_index] if ch.isdigit())
+            if len(org) != 9:
+                continue
+            scanned += 1
+            if org not in wanted:
+                continue
+            raw_row = {header: row[index] for index, header in enumerate(headers) if index < len(row)}
+            yield scanned, normalize_row(raw_row)
+
+
 def deterministic_sample(path: str | Path, count: int, seed: int = 20260822) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     # Keep one population reservoir plus bounded stress reservoirs. Report the slices separately.
     rng = random.Random(seed)

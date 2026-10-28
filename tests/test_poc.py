@@ -1,7 +1,7 @@
 from __future__ import annotations
-from norway_company_agent.sampling import deterministic_extension_sample, deterministic_financial_filer_sample, deterministic_website_audit_sample, financial_filer_eligible, iter_bulk, normalize_row, stratum  # noqa: E402
+from norway_company_agent.sampling import deterministic_extension_sample, deterministic_financial_filer_sample, deterministic_website_audit_sample, financial_filer_eligible, iter_bulk, iter_bulk_selected, normalize_row, stratum  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
-from norway_company_agent.contract import profile_to_contract  # noqa: E402
+from norway_company_agent.contract import availability, profile_to_contract, validate_output_envelopes  # noqa: E402
 import subprocess
 import json
 import gzip
@@ -10,6 +10,8 @@ import math
 import sys
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,7 +35,7 @@ from norway_company_agent.external_footprint import aggregate_footprint, publish
 from norway_company_agent.external_tasks import plan_external_tasks  # noqa: E402
 from norway_company_agent.external_control import development_score, run_company_control, strategy_order  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate, assess_social_identity, assess_website_identity  # noqa: E402
-from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, fetch_website, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
+from norway_company_agent.website import _REQUEST_LOCAL, SafeRedirectHandler, _extraction_state, _fetch_secondary_page, _priority_links, _robots_allowed, _social_links, assert_public_url, fetch_website, identity_text_excerpt, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.snapshots import SnapshotFetcher  # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
@@ -42,7 +44,7 @@ from scripts.run_brave_discovery import brave_search  # noqa: E402
 from scripts.run_annual_report_workforce_connector import extract_candidate, needs_ocr  # noqa: E402
 from scripts.normalize_google_maps_results import candidate_score  # noqa: E402
 from scripts.run_scrapy_websites import terminal_events_for_run  # noqa: E402
-from scripts.run_signalpost_submission import attach_company_site_evidence, attach_nav_evidence, third_party_cost_report  # noqa: E402
+from scripts.run_signalpost_submission import attach_company_site_evidence, attach_nav_evidence, crawl_artifact_key, load_optional_nav_snapshot, read_optional_site_outputs, run_optional_crawler, third_party_cost_report  # noqa: E402
 from scripts import run_competition_batch as competition_batch_runner  # noqa: E402
 from scripts.run_sentiment_model import MODEL_REVISION, normalize_generated_label  # noqa: E402
 from scripts.score_company_completeness import score_rows, summarize  # noqa: E402
@@ -57,6 +59,7 @@ from scripts.run_linkedin_guest_experiment import (  # noqa: E402
     legal_name_profile_url,
 )
 from scripts.run_fagfolkguiden_reviews_connector import extract_aggregate_rating, slug  # noqa: E402
+from scripts.run_nav_workforce_connector import build_lookup_index, load_brreg_collisions, match_company  # noqa: E402
 from scripts.discover_linkedin_company_profiles import (  # noqa: E402
     discovery_identity as linkedin_discovery_identity,
     normalized_full_name as linkedin_normalized_full_name,
@@ -83,6 +86,57 @@ class SubmissionCostTests(unittest.TestCase):
             third_party_cost_report(True),
             (None, "unknown_requires_provider_billing_data"),
         )
+
+
+class NavCollisionSnapshotTests(unittest.TestCase):
+    def test_collision_loader_reads_bom_plain_comma_csv_and_normalizes_legal_suffixes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.csv"
+            path.write_text(
+                "organisasjonsnummer,navn\n"
+                "111111111,Example AS\n"
+                "222222222,Example DA\n"
+                "333333333,Unique Company AS\n",
+                encoding="utf-8-sig",
+            )
+            collisions = load_brreg_collisions(str(path))
+        self.assertIn("example", collisions)
+        self.assertNotIn("unique company", collisions)
+
+    def test_collision_loader_sniffs_gzip_bytes_and_semicolon_delimiter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.csv"
+            with gzip.open(path, "wt", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.writer(handle, delimiter=";")
+                writer.writerow(["organisasjonsnummer", "navn"])
+                writer.writerow(["111111111", "Duplicate AS"])
+                writer.writerow(["222222222", "Duplicate ASA"])
+            collisions = load_brreg_collisions(str(path))
+        self.assertIn("duplicate", collisions)
+
+    def test_collision_loader_fails_closed_when_name_column_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.csv"
+            path.write_text("orgnr,industry\n111111111,foo\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "company-name column"):
+                load_brreg_collisions(str(path))
+
+
+class NavIdentityMatchingTests(unittest.TestCase):
+    def test_job_match_requires_exact_normalized_name_and_municipality(self):
+        entries = [
+            {"uuid": "exact", "businessName": "Example AS", "municipal": "OSLO"},
+            {"uuid": "reordered", "businessName": "Consulting North AS", "municipal": "OSLO"},
+        ]
+        index = build_lookup_index(entries)
+        matches = match_company("Example AS", "Oslo", index, collisions=set())
+        self.assertEqual([item["uuid"] for item in matches], ["exact"])
+        self.assertEqual(matches[0]["match_method"], "exact_normalized_name+municipality")
+        self.assertEqual(match_company("North Consulting AS", "Oslo", index, collisions=set()), [])
+        self.assertEqual(match_company("Example AS", "Bergen", index, collisions=set()), [])
+        self.assertEqual(match_company("Example AS", "Oslo", index, collisions={"example"}), [])
+        with self.assertRaisesRegex(ValueError, "threshold 100"):
+            match_company("Example AS", "Oslo", index, collisions=set(), threshold=80)
 
     def test_available_zero_is_preserved(self):
         record = evidence("employees", "available", "official_registry_bulk", "https://example.test", value=0)
@@ -591,20 +645,66 @@ class CompletenessScoreTests(unittest.TestCase):
 
     def test_site_news_requires_exact_identity_and_a_captured_news_path(self):
         profile = {
+            "name": "Example AS",
             "organisation_number": "923609016",
             "evidence": {"website": {
                 "status": "available", "retrieved_at": "2026-08-23T00:00:00Z",
                 "value": {
                     "identity_assessment": {"publishable": True, "score": 1.0},
-                    "pages": [{"url": "https://example.test/aktuelt/new-contract", "title": "New contract", "content_sha256": "a" * 64}],
+                    "pages": [{
+                        "url": "https://example.test/aktuelt/new-contract",
+                        "title": "New contract", "published_at": "2026-08-21",
+                        "main_text_excerpt": "Example AS announced a new contract after completing a competitive tender. " * 2,
+                        "content_sha256": "a" * 64,
+                    }],
                 },
             }},
         }
         item = site_news_observation(profile)
         self.assertEqual(item["signal_type"], "public_post")
+        self.assertEqual(item["metrics"]["published_at"], "2026-08-21")
+        self.assertIn("announced a new contract", item["evidence_span"])
         self.assertTrue(publishable_observation(item))
         profile["evidence"]["website"]["value"]["pages"][0]["url"] = "https://example.test/contact"
         self.assertIsNone(site_news_observation(profile))
+
+    def test_site_news_rejects_undated_navigation_even_when_on_news_path(self):
+        profile = {
+            "name": "Example AS", "organisation_number": "923609016",
+            "evidence": {"website": {"status": "available", "value": {
+                "identity_assessment": {"publishable": True},
+                "pages": [{
+                    "url": "https://example.test/news/", "title": "Latest news",
+                    "main_text_excerpt": "News and product links. " * 20,
+                    "content_sha256": "a" * 64,
+                }],
+            }}},
+        }
+        self.assertIsNone(site_news_observation(profile))
+
+    def test_site_news_accepts_dated_company_news_route(self):
+        profile = {
+            "name": "Guard Automation AS", "organisation_number": "932315041",
+            "evidence": {"website": {
+                "status": "available", "retrieved_at": "2026-10-27T00:00:00Z",
+                "value": {
+                    "identity_assessment": {"publishable": True, "score": 1.0, "method": "test"},
+                    "pages": [{
+                        "url": "https://www.guard.no/en/company-news/guard-expands-in-denmark-x-automation-joins-guard",
+                        "title": "Guard Expands in Denmark - X Automation Joins Guard",
+                        "article_headline": "Guard Expands in Denmark - X Automation Joins Guard",
+                        "published_at": "2025-11-14", "article_type": "article",
+                        "main_text_excerpt": "Guard continues to strengthen its Nordic presence through the acquisition of X Automation, a Danish automation company. " * 3,
+                        "content_sha256": "b" * 64,
+                    }],
+                },
+            }},
+        }
+        item = site_news_observation(profile)
+        self.assertIsNotNone(item)
+        self.assertEqual(item["metrics"]["published_at"], "2025-11-14")
+        self.assertIn("company-news/", item["source_url"])
+        self.assertTrue(publishable_observation(item))
 
     def test_verified_observations_require_known_org_and_snapshot_hash(self):
         profiles = [{"organisation_number": "923609016", "name": "Example AS"}]
@@ -701,6 +801,21 @@ class SamplingTests(unittest.TestCase):
         self.assertEqual(records[0]["organisation_number"], "987654321")
         self.assertEqual(records[0]["name"], "Example AS")
 
+    def test_targeted_registry_scan_matches_full_normalization_and_reports_scan_position(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registry.csv"
+            path.write_text(
+                "organisasjonsnummer;navn;organisasjonsform.kode\n"
+                "111111111;First AS;AS\n"
+                "222222222;Second AS;AS\n"
+                "333333333;Third AS;AS\n",
+                encoding="utf-8-sig",
+            )
+            selected = list(iter_bulk_selected(path, ["333333333", "111111111"]))
+            full = {row["organisation_number"]: row for row in iter_bulk(path)}
+        self.assertEqual([index for index, _ in selected], [1, 3])
+        self.assertEqual([row for _, row in selected], [full["111111111"], full["333333333"]])
+
     def test_fresh_website_audit_sample_excludes_poc_and_deduplicates_hosts(self):
         fields = ["organisasjonsnummer", "navn", "hjemmeside", "organisasjonsform.kode"]
         rows = [
@@ -749,6 +864,44 @@ class OperationsTests(unittest.TestCase):
             self.assertAlmostEqual(official._history_last_request, 13.3)
         finally:
             official._history_last_request = old
+
+    def test_json_fetch_counts_retry_attempts_for_resource_accounting(self):
+        import urllib.error
+        from unittest.mock import patch
+        from norway_company_agent.http import fetch_json
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"ok":true}'
+
+        with patch("norway_company_agent.http.urllib.request.build_opener") as build_opener, patch(
+            "norway_company_agent.http.time.sleep"
+        ):
+            build_opener.return_value.open.side_effect = [
+                urllib.error.URLError("temporary"), urllib.error.URLError("temporary"), Response(),
+            ]
+            result = fetch_json("https://example.test/api", attempts=3)
+        self.assertEqual(result.status, 200)
+        self.assertEqual(result.request_attempts, 3)
+
+    def test_json_fetch_redirects_count_as_outbound_requests(self):
+        from norway_company_agent.http import _CountingRedirectHandler
+
+        handler = _CountingRedirectHandler()
+        redirected = handler.redirect_request(
+            urllib.request.Request("https://example.test/old"), None, 302,
+            "Found", {}, "https://example.test/new",
+        )
+        self.assertIsNotNone(redirected)
+        self.assertEqual(handler.redirects, 1)
 
     def test_batch_input_preserves_split_annotations(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -800,6 +953,31 @@ class OperationsTests(unittest.TestCase):
         self.assertTrue(profile_complete_for_modules(complete, ["registry", "website"]))
         self.assertFalse(profile_complete_for_modules(partial, ["registry", "website"]))
 
+    def test_batch_resume_requires_matching_run_registry_and_modules(self):
+        profile = {
+            "evidence": {"registry": {"status": "available"}, "website": {"status": "not_found"}},
+            "_submission_run_id": "run-a",
+            "_registry_snapshot_sha256": "a" * 64,
+            "_requested_modules": ["registry", "website"],
+        }
+        expected = {
+            "run_id": "run-a",
+            "registry_snapshot_sha256": "a" * 64,
+            "requested_modules": ["registry", "website"],
+        }
+        self.assertTrue(competition_batch_runner.resume_profile_matches(profile, **expected))
+        self.assertFalse(competition_batch_runner.resume_profile_matches(profile, **{**expected, "run_id": "run-b"}))
+        self.assertFalse(competition_batch_runner.resume_profile_matches(profile, **{**expected, "registry_snapshot_sha256": "b" * 64}))
+        self.assertFalse(competition_batch_runner.resume_profile_matches(profile, **{**expected, "requested_modules": ["registry"]}))
+
+    def test_resumed_profile_operations_are_included_in_batch_totals(self):
+        operations = {"requests": 2, "bytes": 50, "latencies_ms": [10]}
+        competition_batch_runner.accumulate_operations(
+            operations,
+            {"requests": 4, "bytes": 300, "latencies_ms": [20, 30]},
+        )
+        self.assertEqual(operations, {"requests": 6, "bytes": 350, "latencies_ms": [10, 20, 30]})
+
     def test_nearest_rank_percentiles_are_deterministic(self):
         self.assertEqual(percentile([1, 2, 3, 4, 100], 0.5), 3)
         self.assertEqual(percentile([1, 2, 3, 4, 100], 0.95), 100)
@@ -813,6 +991,125 @@ class OperationsTests(unittest.TestCase):
 
 
 class WebsiteTests(unittest.TestCase):
+    def test_default_website_fetch_preserves_footer_identity_for_exact_gate(self):
+        class Response:
+            headers = {"content-type": "text/html; charset=utf-8"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return (
+                    b"<html><head><title>Business services</title></head><body>"
+                    b"<main>Example North provides useful services to local companies. "
+                    b"This is substantive public website content for identity review.</main>"
+                    b"<footer>Example North AS</footer></body></html>"
+                )
+
+            def geturl(self):
+                return "https://example.test/"
+
+        with patch("norway_company_agent.website.assert_public_url"), patch(
+            "norway_company_agent.website._robots_allowed", return_value=True
+        ), patch("norway_company_agent.website.SAFE_OPENER.open", return_value=Response()):
+            website, _metrics = fetch_website("https://example.test/")
+        self.assertEqual(website["value"]["identity_text_excerpt"], "Example North AS")
+        profile = {
+            "organisation_number": "123456789", "name": "Example North AS", "evidence": {},
+        }
+        gated = apply_website_identity_gate(profile, website)
+        self.assertTrue(gated["assessment"]["publishable"])
+
+    def test_identity_excerpt_helper_bounds_footer_and_contact_text(self):
+        soup = BeautifulSoup(
+            "<footer>Example AS</footer><address>Oslo</address><main>Not identity metadata</main>",
+            "html.parser",
+        )
+        self.assertEqual(identity_text_excerpt(soup), "Example AS Oslo")
+
+    def test_robots_policy_fails_closed_except_for_missing_file(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b"User-agent: *\nDisallow: /private\n"
+
+        with patch("norway_company_agent.website.assert_public_url"), patch(
+            "norway_company_agent.website.SAFE_OPENER.open", return_value=Response()
+        ):
+            self.assertFalse(_robots_allowed("https://example.test/private", 1))
+
+        missing = urllib.error.HTTPError("https://example.test/robots.txt", 404, "missing", {}, None)
+        with patch("norway_company_agent.website.assert_public_url"), patch(
+            "norway_company_agent.website.SAFE_OPENER.open", side_effect=missing
+        ):
+            self.assertTrue(_robots_allowed("https://example.test/", 1))
+
+        forbidden = urllib.error.HTTPError("https://example.test/robots.txt", 403, "forbidden", {}, None)
+        with patch("norway_company_agent.website.assert_public_url"), patch(
+            "norway_company_agent.website.SAFE_OPENER.open", side_effect=forbidden
+        ):
+            with self.assertRaises(urllib.error.HTTPError):
+                _robots_allowed("https://example.test/", 1)
+
+    def test_secondary_robots_failure_does_not_discard_homepage(self):
+        with patch("norway_company_agent.website._robots_allowed", side_effect=urllib.error.URLError("temporary DNS failure")):
+            page, social, requests, bytes_received, elapsed, error = _fetch_secondary_page(
+                "https://example.test/news/story",
+                homepage_domain="example.test",
+                timeout=1,
+                max_bytes=1000,
+            )
+        self.assertIsNone(page)
+        self.assertEqual(social, [])
+        self.assertEqual(requests, 1)
+        self.assertEqual(bytes_received, 0)
+        self.assertEqual(elapsed, 0)
+        self.assertIn("robots check failed", error or "")
+
+    def test_secondary_website_request_metric_includes_followed_redirects(self):
+        class Response:
+            headers = {"content-type": "text/html; charset=utf-8"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b"<html><head><title>Story</title></head><body><main>" + b"Company news content. " * 8 + b"</main></body></html>"
+
+            def geturl(self):
+                return "https://example.com/news/story"
+
+        def followed_redirect(_request, timeout):
+            handler = SafeRedirectHandler()
+            handler.redirect_request(
+                urllib.request.Request("https://example.com/news/old"), None, 302,
+                "Found", {}, "https://example.com/news/story",
+            )
+            return Response()
+
+        before = int(getattr(_REQUEST_LOCAL, "redirects", 0))
+        with patch("norway_company_agent.website._robots_allowed", return_value=True), patch(
+            "norway_company_agent.website.assert_public_url"
+        ), patch("norway_company_agent.website.SAFE_OPENER.open", side_effect=followed_redirect):
+            page, _social, requests, _bytes, _elapsed, error = _fetch_secondary_page(
+                "https://example.com/news/story", homepage_domain="example.com", timeout=1, max_bytes=1000,
+            )
+        self.assertEqual(int(getattr(_REQUEST_LOCAL, "redirects", 0)) - before, 1)
+        self.assertIsNotNone(page)
+        self.assertIsNone(error)
+        self.assertEqual(requests, 3)
+
     def test_interrupted_run_does_not_synthesize_terminal_failures(self):
         profiles = [{"organisation_number": "1", "website": "pending.no"}]
         self.assertEqual(terminal_events_for_run(profiles, [], False), [])
@@ -858,6 +1155,27 @@ class WebsiteTests(unittest.TestCase):
         self.assertEqual(record["content_sha256"], homepage["content_sha256"])
         self.assertEqual(record["value"]["scheduler"], "scrapy_resumable_v1")
 
+    def test_article_published_date_is_extracted_but_updated_date_is_not(self):
+        published = extract_page_event(
+            organisation_number="923609016", requested_url="https://example.no/news/story",
+            final_url="https://example.no/news/story", status_code=200,
+            content_type="text/html", page_kind="priority",
+            body=(b'<html><head><title>Example launch</title>'
+                  b'<meta property="article:published_time" content="2026-08-22T09:00:00Z">'
+                  b'<meta property="article:modified_time" content="2026-09-01T09:00:00Z">'
+                  b'</head><body><main><p>Example AS announced a new product at the conference.</p></main></body></html>'),
+        )
+        updated_only = extract_page_event(
+            organisation_number="923609016", requested_url="https://example.no/news/old",
+            final_url="https://example.no/news/old", status_code=200,
+            content_type="text/html", page_kind="priority",
+            body=(b'<html><head><title>Old story</title>'
+                  b'<meta property="article:modified_time" content="2026-09-01T09:00:00Z">'
+                  b'<time datetime="2026-09-02">Updated</time></head><body>Old post text</body></html>'),
+        )
+        self.assertEqual(published["published_at"], "2026-08-22")
+        self.assertIsNone(updated_only["published_at"])
+
     def test_footer_identity_is_preserved_for_exact_company_gate(self):
         event = extract_page_event(
             organisation_number="985628572",
@@ -884,6 +1202,7 @@ class WebsiteTests(unittest.TestCase):
     def test_normalizes_registry_hostname(self):
         self.assertEqual(normalize_homepage("example.no"), "https://example.no/")
         self.assertEqual(normalize_homepage("http://example.no"), "http://example.no/")
+        self.assertIsNone(normalize_homepage("https://user:secret@example.no/"))
 
     def test_only_extracts_declared_social_links(self):
         soup = BeautifulSoup('<a href="https://www.linkedin.com/company/example/">LinkedIn</a><a href="/about">About</a>', "html.parser")
@@ -947,6 +1266,11 @@ class WebsiteTests(unittest.TestCase):
 
     def test_blocks_local_network_targets(self):
         for url in ("http://127.0.0.1/admin", "http://localhost/", "http://169.254.169.254/latest/meta-data"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                assert_public_url(url)
+
+    def test_blocks_embedded_url_credentials_and_malformed_ports(self):
+        for url in ("https://user:secret@example.no/", "https://example.no:bad/", "https://example.no:0/"):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 assert_public_url(url)
 
@@ -1295,13 +1619,25 @@ class PrototypeTests(unittest.TestCase):
             "source_url": "https://arbeidsplassen.nav.no/stillinger/stilling/example",
             "retrieved_at": "2026-10-04T00:00:00Z", "content_sha256": "b" * 64,
             "exact_entity": True, "rights_status": "approved", "acquisition_mode": "official_api",
-            "identity_proof": [{"value": {"match_score": 99.9}}], "metrics": {"active_job_count": 1},
+            "identity_proof": [{"type": "exact_normalized_name_municipality_match", "value": {"match_score": 99.9, "match_method": "exact_normalized_name+municipality"}}], "metrics": {"active_job_count": 1},
             "evidence_span": "Engineer", "strategy": "jobs_feed_discovery",
         }
         attach_nav_evidence(profiles, [base])
         self.assertNotIn("workforce_jobs", profiles[0]["evidence"])
-        attach_nav_evidence(profiles, [{**base, "identity_proof": [{"value": {"match_score": 100}}]}])
+        fuzzy_100 = {**base, "identity_proof": [{"type": "fuzzy_name_municipality_match", "value": {"match_score": 100, "match_method": "name+municipality"}}]}
+        attach_nav_evidence(profiles, [fuzzy_100])
+        self.assertNotIn("workforce_jobs", profiles[0]["evidence"])
+        exact_100 = {**base, "identity_proof": [{"type": "exact_normalized_name_municipality_match", "value": {"match_score": 100, "match_method": "exact_normalized_name+municipality"}}]}
+        attach_nav_evidence(profiles, [exact_100])
         self.assertEqual(profiles[0]["evidence"]["workforce_jobs"]["value"]["active_job_count"], 1)
+        self.assertEqual(
+            profiles[0]["evidence"]["workforce_jobs"]["as_of"],
+            "2026-10-04T00:00:00Z",
+        )
+        envelope = profile_to_contract(profiles[0], run_id="nav-as-of")
+        workforce_claim = next(item for item in envelope["claims"] if item["field"] == "workforce_jobs")
+        workforce_source = next(item for item in envelope["evidence"] if item["id"] in workforce_claim["evidence_ids"])
+        self.assertEqual(workforce_source["reporting_period"], "2026-10-04T00:00:00Z")
 
 
 class RefreshTests(unittest.TestCase):
@@ -1337,6 +1673,27 @@ class RefreshTests(unittest.TestCase):
         }
         self.assertEqual(diff_profile(old, new), [])
 
+    def test_refresh_reports_changed_verified_job_facts(self):
+        old_record = evidence(
+            "workforce_jobs", "available", "official_nav_stilling_feed",
+            "https://arbeidsplassen.nav.no/stillinger/stilling/old",
+            value={"active_job_count": 1, "job_titles": "Engineer"},
+            content_sha256="a" * 64,
+        )
+        new_record = evidence(
+            "workforce_jobs", "available", "official_nav_stilling_feed",
+            "https://arbeidsplassen.nav.no/stillinger/stilling/new",
+            value={"active_job_count": 2, "job_titles": "Engineer; Analyst"},
+            content_sha256="b" * 64,
+        )
+        old = {"organisation_number": "923609016", "evidence": {"workforce_jobs": old_record}}
+        new = {"organisation_number": "923609016", "evidence": {"workforce_jobs": new_record}}
+        changes = diff_profile(old, new)
+        by_field = {item["field"]: item for item in changes}
+        self.assertEqual(by_field["workforce_jobs.active_job_count"]["old_value"], 1)
+        self.assertEqual(by_field["workforce_jobs.active_job_count"]["new_value"], 2)
+        self.assertEqual(by_field["workforce_jobs.active_job_count"]["new_content_sha256"], "b" * 64)
+
     def test_refresh_rejects_membership_or_identity_drift(self):
         with self.assertRaises(ValueError):
             diff_datasets([{"organisation_number": "923609016"}], [{"organisation_number": "999999999"}])
@@ -1368,6 +1725,47 @@ class WebsiteIdentityTests(unittest.TestCase):
         self.assertFalse(result["assessment"]["publishable"])
         self.assertEqual(result["website"]["value"]["social_links"], [])
         self.assertEqual(result["quarantined_social_links"], 1)
+
+    def test_official_group_parent_website_is_not_published_as_child_site(self):
+        profile = {
+            "organisation_number": "923609016", "name": "Example AS",
+            "evidence": {"group": {"status": "available", "value": {
+                "organisasjonsnummer": "999999999", "navn": "Parent Holdings AS",
+                "children": [{"organisasjonsnummer": "923609016", "navn": "Example AS"}],
+            }}},
+        }
+        website = evidence("website", "available", "company_site", "https://parent.example", value={
+            "final_url": "https://parent.example/", "title": "Parent Holdings Group",
+            "main_text_excerpt": "Parent Holdings owns a range of businesses and provides central services. " * 3,
+            "social_links": [{"platform": "linkedin", "url": "https://linkedin.com/company/parent-holdings"}],
+        })
+        result = apply_website_identity_gate(profile, website)
+        self.assertFalse(result["assessment"]["publishable"])
+        self.assertTrue(any("group parent" in item for item in result["assessment"]["reasons"]))
+        self.assertEqual(result["website"]["value"]["social_links"], [])
+
+    def test_group_parent_in_homepage_footer_prevents_child_promotion(self):
+        profile = {
+            "organisation_number": "923609016", "name": "Example Child AS",
+            "evidence": {
+                "group": {
+                    "status": "available",
+                    "value": {
+                        "organisasjonsnummer": "999999999",
+                        "navn": "Parent Holdings AS",
+                    },
+                },
+            },
+        }
+        website = evidence("website", "available", "company_site", "https://parent.example/", value={
+            "final_url": "https://parent.example/", "title": "Contact",
+            "description": "Example Child AS provides services.",
+            "identity_text_excerpt": "Parent Holdings AS, group headquarters",
+            "main_text_excerpt": "Example Child AS is one part of a wider group.",
+        })
+        result = apply_website_identity_gate(profile, website)
+        self.assertFalse(result["assessment"]["publishable"])
+        self.assertTrue(any("group parent" in item for item in result["assessment"]["reasons"]))
 
     def test_exact_legal_name_is_publishable(self):
         row = {"organisation_number": "923609016", "name": "Norsk Fiskeeksport AS", "evidence": {"website": {"status": "available", "value": {"title": "Norsk Fiskeeksport AS"}}}}
@@ -1510,6 +1908,134 @@ class StableEvidenceIdTests(unittest.TestCase):
             second["evidence"][0]["retrieved_at"],
         )
 
+    def test_unassessed_website_is_ambiguous_and_unattempted_is_not_available(self):
+        profile = {
+            "organisation_number": "100000001",
+            "name": "Example AS",
+            "evidence": {
+                "website": evidence(
+                    "website", "available", "registry_linked_company_website",
+                    "https://example.test/", value={"final_url": "https://example.test/", "title": "Example"},
+                ),
+            },
+        }
+        envelope = profile_to_contract(
+            profile,
+            run_id="identity-guard",
+            started_at="2026-10-27T00:00:00Z",
+            completed_at="2026-10-27T00:00:01Z",
+        )
+        website_claim = next(item for item in envelope["claims"] if item["field"] == "website")
+        self.assertEqual(website_claim["availability"], "ambiguous")
+        self.assertFalse(envelope["public_brand"]["verified"])
+        self.assertEqual(availability("not_fetched"), "failed")
+
+    def test_synthesis_does_not_treat_ambiguous_parent_site_as_verified(self):
+        profile = {
+            "organisation_number": "100000001",
+            "name": "Example Child AS",
+            "industry_label": "Software development",
+            "evidence": {
+                "registry": evidence(
+                    "registry", "available", "official_registry_bulk",
+                    "https://data.example.test/entities/100000001",
+                    value={"name": "Example Child AS", "industry": "Software development"},
+                    content_sha256="a" * 64,
+                ),
+                "website": evidence(
+                    "website", "available", "registry_linked_company_website",
+                    "https://parent.example/",
+                    value={
+                        "description": "Parent company description must not be synthesized for the child.",
+                        "identity_assessment": {"publishable": False, "status": "related_or_uncertain"},
+                    },
+                    content_sha256="b" * 64,
+                ),
+            },
+        }
+        envelope = profile_to_contract(profile, run_id="ambiguous-site-synthesis")
+        website_claim = next(item for item in envelope["claims"] if item["field"] == "website")
+        synthesis_claim = next(item for item in envelope["claims"] if item["field"] == "synthesis")
+        self.assertEqual(website_claim["availability"], "ambiguous")
+        self.assertNotIn("Parent company description", synthesis_claim["value"]["what_it_does"])
+        self.assertIn(
+            "No verified company website was attributed to this legal entity in this run.",
+            synthesis_claim["value"]["what_is_unknown"],
+        )
+        self.assertNotIn(website_claim["evidence_ids"][0], synthesis_claim["evidence_ids"])
+
+    def test_output_contract_validator_checks_evidence_links_and_timestamps(self):
+        profile = {
+            "organisation_number": "100000001",
+            "name": "Example AS",
+            "evidence": {
+                "registry": evidence(
+                    "registry", "available", "official_registry_bulk",
+                    "https://data.example.test/entities/100000001",
+                    value={"name": "Example AS"},
+                    retrieved_at="2026-10-27T00:00:00Z",
+                    content_sha256="a" * 64,
+                ),
+            },
+        }
+        envelope = profile_to_contract(
+            profile,
+            run_id="contract-validation",
+            started_at="2026-10-27T00:00:00Z",
+            completed_at="2026-10-27T00:00:01Z",
+        )
+        validation = validate_output_envelopes([envelope], ["100000001"])
+        self.assertTrue(validation["passed"], validation)
+        envelope["claims"][0]["evidence_ids"] = ["ev-missing"]
+        report = validate_output_envelopes([envelope], ["100000001"])
+        self.assertFalse(report["passed"])
+        self.assertIn("references missing evidence id", " ".join(item["reason"] for item in report["errors"]))
+
+        envelope["claims"][0]["evidence_ids"] = [envelope["evidence"][0]["id"]]
+        envelope["evidence"][0]["source_url"] = "https://user:secret@example.test/claim"
+        credential_report = validate_output_envelopes([envelope], ["100000001"])
+        self.assertFalse(credential_report["passed"])
+        self.assertIn("must not embed credentials", " ".join(item["reason"] for item in credential_report["errors"]))
+
+        envelope["evidence"][0]["source_url"] = "https://[invalid/claim"
+        malformed_url_report = validate_output_envelopes([envelope], ["100000001"])
+        self.assertFalse(malformed_url_report["passed"])
+        self.assertIn("valid public HTTP(S)", " ".join(item["reason"] for item in malformed_url_report["errors"]))
+
+        envelope["evidence"][0]["source_url"] = "http://10.0.0.8/private"
+        private_url_report = validate_output_envelopes([envelope], ["100000001"])
+        self.assertFalse(private_url_report["passed"])
+        self.assertIn("private or reserved", " ".join(item["reason"] for item in private_url_report["errors"]))
+
+        empty_batch_report = validate_output_envelopes([], [])
+        self.assertFalse(empty_batch_report["passed"])
+        self.assertFalse(empty_batch_report["checks"]["nonempty_input_batch"])
+
+    def test_financial_reporting_period_is_explicit_in_evidence(self):
+        profile = {
+            "organisation_number": "100000001",
+            "evidence": {
+                "financials": evidence(
+                    "financials", "available", "official_annual_accounts",
+                    "https://registry.example/accounts/100000001",
+                    value={"records": [{"period": {"fraDato": "2024-01-01", "tilDato": "2024-12-31"}, "revenue": 12}]},
+                    retrieved_at="2026-10-27T00:00:00Z",
+                    content_sha256="b" * 64,
+                ),
+            },
+        }
+        envelope = profile_to_contract(
+            profile,
+            run_id="financial-period",
+            started_at="2026-10-27T00:00:00Z",
+            completed_at="2026-10-27T00:00:01Z",
+        )
+        financial_claim = next(item for item in envelope["claims"] if item["field"] == "financials")
+        financial_evidence = next(item for item in envelope["evidence"] if item["id"] == financial_claim["evidence_ids"][0])
+        self.assertEqual(financial_evidence["reporting_period"], "2024-01-01/2024-12-31")
+        validation = validate_output_envelopes([envelope], ["100000001"])
+        self.assertTrue(validation["passed"], validation)
+
     def test_contract_recursively_emits_strict_json(self):
         profile = {
             "organisation_number": "100000001",
@@ -1520,7 +2046,7 @@ class StableEvidenceIdTests(unittest.TestCase):
                     "retrieved_at": datetime(2026, 10, 14, tzinfo=timezone.utc),
                     "content_sha256": "a" * 64,
                     "value": {
-                        2025: {None: "discarded", "values": {"a", "b"}},
+                        2025: {None: "preserved under string key", "values": {"a", "b"}},
                         "nan": math.nan,
                         "infinity": math.inf,
                         "path": Path("cache/source.json"),
@@ -1532,6 +2058,7 @@ class StableEvidenceIdTests(unittest.TestCase):
         envelope = profile_to_contract(profile, run_id="strict-json")
         encoded = json.dumps(envelope, ensure_ascii=False, sort_keys=True, allow_nan=False)
         self.assertIn('"2025"', encoded)
+        self.assertIn('"None": "preserved under string key"', encoded)
         self.assertNotIn("NaN", encoded)
         self.assertNotIn("Infinity", encoded)
         self.assertEqual(envelope["legal_identity"]["legal_name"], None)
@@ -1564,6 +2091,64 @@ class StableEvidenceIdTests(unittest.TestCase):
         self.assertEqual(from_envelope["errors"][0]["type"], "refresh_comparison_unavailable")
 
 class OverflowRunnerEndToEndTests(unittest.TestCase):
+    def test_optional_site_outputs_require_complete_consistent_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            observations = root / "observations.jsonl"
+            report = root / "report.json"
+            with self.assertRaises(ValueError):
+                read_optional_site_outputs(observations, report, expected_profiles=2)
+
+            observations.write_text('{"id":"one"}\n', encoding="utf-8")
+            report.write_text('{"profiles":2,"observations":1}', encoding="utf-8")
+            rows, summary = read_optional_site_outputs(observations, report, expected_profiles=2)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(summary["profiles"], 2)
+
+            report.write_text('{"profiles":1,"observations":1}', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                read_optional_site_outputs(observations, report, expected_profiles=2)
+
+            observations.write_text('{"id":"one"}\n[]\n', encoding="utf-8")
+            report.write_text('{"profiles":2,"observations":2}', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                read_optional_site_outputs(observations, report, expected_profiles=2)
+
+    def test_crawl_artifacts_are_isolated_by_run_id_and_batch(self):
+        orgs = ["100000001", "100000002"]
+        started = "2026-10-27T00:00:00Z"
+        self.assertEqual(crawl_artifact_key("round-1", orgs, started), crawl_artifact_key("round-1", orgs, started))
+        self.assertNotEqual(crawl_artifact_key("round-1", orgs, started), crawl_artifact_key("round-2", orgs, started))
+        self.assertNotEqual(crawl_artifact_key("round-1", orgs, started), crawl_artifact_key("round-1", list(reversed(orgs)), started))
+        self.assertNotEqual(crawl_artifact_key("round-1", orgs, started), crawl_artifact_key("round-1", orgs, "2026-10-27T00:00:01Z"))
+
+    def test_optional_crawler_failure_preserves_base_profiles_and_marks_unknown_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            base = d / "base.jsonl"
+            crawled = d / "crawled.jsonl"
+            events = d / "events.jsonl"
+            report_path = d / "crawl-report.json"
+            base.write_text('{"organisation_number":"100000001","name":"Example AS"}\n', encoding="utf-8")
+            with patch("scripts.run_signalpost_submission.subprocess.run", side_effect=subprocess.CalledProcessError(1, ["crawler"])):
+                report, error = run_optional_crawler(
+                    ["crawler"], base_profiles=base, crawled_profiles=crawled,
+                    events_path=events, report_path=report_path,
+                    expected_organisation_numbers=["100000001"],
+                )
+            self.assertIsNotNone(error)
+            self.assertEqual(json.loads(crawled.read_text(encoding="utf-8")), json.loads(base.read_text(encoding="utf-8")))
+            self.assertEqual(events.read_text(encoding="utf-8"), "")
+            self.assertFalse(report["request_count_complete"])
+            self.assertEqual(json.loads(report_path.read_text(encoding="utf-8"))["status"], "failed")
+
+    def test_malformed_optional_nav_snapshot_is_skipped_without_aborting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nav.json"
+            for raw in ("[]", '{"items": [], "metadata": null}', '{"items": [], "metadata": {"feed_exhausted": false}}'):
+                path.write_text(raw, encoding="utf-8")
+                self.assertIsNone(load_optional_nav_snapshot(path))
+
     def test_one_command_runner_uses_absolute_paths_from_foreign_working_directory(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
@@ -1593,6 +2178,37 @@ class OverflowRunnerEndToEndTests(unittest.TestCase):
             self.assertTrue((d / "viewer.html").exists())
             self.assertTrue((d / "relative-intermediate/base-report.json").exists())
 
+    def test_same_out_dir_refresh_loads_prior_raw_snapshot_before_replacing_it(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            batch = d / "input.csv"
+            batch.write_text("orgnr\n923609016\n", encoding="utf-8")
+            bulk = d / "registry.csv"
+            bulk.write_text("organisasjonsnummer;navn;organisasjonsform.kode\n923609016;Example AS;AS\n", encoding="utf-8")
+            out_dir = d / "intermediate"
+            for run_id in ("refresh-first", "refresh-second"):
+                result = subprocess.run(
+                    [
+                        sys.executable, str(root / "scripts/run_signalpost_submission.py"),
+                        "--organisations", str(batch), "--bulk", str(bulk),
+                        "--output", str(d / f"{run_id}.jsonl"), "--report", str(d / f"{run_id}.json"),
+                        "--viewer", str(d / f"{run_id}.html"), "--run-id", run_id,
+                        "--expected-count", "1", "--out-dir", str(out_dir), "--nav-snapshot", str(d / "missing-nav.gz"),
+                        "--modules", "registry,accounting_obligation",
+                    ],
+                    cwd=d,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr[-2000:] + result.stdout[-2000:])
+            second_report = json.loads((d / "refresh-second.json").read_text(encoding="utf-8"))
+            second_envelope = json.loads((d / "refresh-second.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(second_report["previous_profiles_count"], 1)
+            self.assertEqual(second_envelope["refresh"]["mode"], "comparison")
+            self.assertIsNotNone(second_envelope["refresh"]["previous_snapshot_id"])
+
     def test_single_company_worker_exception_still_emits_terminal_envelope(self):
         with tempfile.TemporaryDirectory() as directory:
             d = Path(directory)
@@ -1618,6 +2234,7 @@ class OverflowRunnerEndToEndTests(unittest.TestCase):
             self.assertEqual(profile["evidence"]["website"]["status"], "source_error")
             report = json.loads((d / "report.json").read_text(encoding="utf-8"))
             self.assertTrue(report["validation"]["passed"])
+            self.assertFalse(report["operations"]["request_count_complete"])
             self.assertEqual(report["expected_count_warning"], "Configured count 1000 differed from input count 1; processed every supplied row.")
 
     def test_submitted_runner_accepts_evaluator_plain_csv_inputs(self):

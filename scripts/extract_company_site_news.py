@@ -5,11 +5,17 @@ import argparse
 import hashlib
 import json
 import re
+from datetime import date
 from pathlib import Path
 from urllib.parse import urlparse
 
 
-NEWS_PATH = re.compile(r"/(?:news|press|aktuelt|nyheter|artikler|blog)(?:/|$)", re.I)
+NEWS_PATH = re.compile(r"/(?:news|company-news|press|aktuelt|nyheter|artikler|blog)(?:/|$)", re.I)
+GENERIC_TITLES = {
+    "news", "nyheter", "aktuelt", "press", "press releases", "blog", "articles",
+    "news archive", "all news", "latest news", "nyhetsarkiv", "alle nyheter",
+}
+GENERIC_SLUGS = {"all", "archive", "archives", "latest", "index", "category", "tag"}
 
 
 def observation(profile: dict) -> dict | None:
@@ -21,12 +27,33 @@ def observation(profile: dict) -> dict | None:
     pages = [
         page for page in (value.get("pages") or [])
         if NEWS_PATH.search(urlparse(str(page.get("url") or "")).path)
+        and page.get("published_at")
+        and len(str(page.get("main_text_excerpt") or "").strip()) >= 80
     ]
     if not pages:
         return None
-    # Prefer an individual article over an archive page when the bounded crawl
-    # captured both. One observation is enough to prove site activity without
-    # rewarding a site for repeated navigation links.
+
+    def is_publishable_article(page: dict) -> bool:
+        path_parts = [part.casefold() for part in urlparse(str(page.get("url") or "")).path.split("/") if part]
+        section_index = next((index for index, part in enumerate(path_parts) if part in {"news", "company-news", "press", "aktuelt", "nyheter", "artikler", "blog"}), None)
+        if section_index is None or section_index >= len(path_parts) - 1:
+            return False
+        if any(part in GENERIC_SLUGS for part in path_parts[section_index + 1:]):
+            return False
+        try:
+            date.fromisoformat(str(page.get("published_at"))[:10])
+        except ValueError:
+            return False
+        title = str(page.get("article_headline") or page.get("title") or "").strip()
+        title_key = re.sub(r"\s+", " ", title.casefold()).strip(" |–—-:")
+        if not title or title_key in GENERIC_TITLES:
+            return False
+        return True
+
+    pages = [page for page in pages if is_publishable_article(page)]
+    if not pages:
+        return None
+    # Prefer the deepest, dated individual article over a section/archive page.
     pages.sort(key=lambda page: (-len([part for part in urlparse(str(page.get("url") or "")).path.split("/") if part]), str(page.get("url") or "")))
     page = pages[0]
     url = str(page.get("url") or "")
@@ -34,7 +61,9 @@ def observation(profile: dict) -> dict | None:
     if not url.startswith(("http://", "https://")) or len(digest) != 64:
         return None
     org = str(profile["organisation_number"])
-    title = str(page.get("title") or "Company news/activity page").strip()
+    title = str(page.get("article_headline") or page.get("title") or "").strip()
+    published_at = date.fromisoformat(str(page["published_at"])[:10]).isoformat()
+    body_excerpt = " ".join(str(page.get("main_text_excerpt") or "").split())[:500]
     return {
         "id": "company-site-news-" + hashlib.sha256(f"{org}|{url}".encode()).hexdigest()[:24],
         "organisation_number": org,
@@ -48,8 +77,13 @@ def observation(profile: dict) -> dict | None:
         "acquisition_mode": "permitted_public_page",
         "rights_status": "approved",
         "source_class": "company_site",
-        "evidence_span": title[:1200],
-        "metrics": {"captured_news_pages": len(pages), "interpretation": "Company-owned activity; not independent sentiment."},
+        "evidence_span": f"Published {published_at}: {title}. {body_excerpt}"[:1200],
+        "metrics": {
+            "published_at": published_at,
+            "article_type": page.get("article_type"),
+            "captured_dated_article_pages": len(pages),
+            "interpretation": "Dated company-owned article; not independent sentiment.",
+        },
         "strategy": "company_site_activity",
     }
 

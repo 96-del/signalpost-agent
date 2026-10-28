@@ -6,8 +6,9 @@ Architecture:
   (can be 300k+ items), keep only ACTIVE entries, save to JSON snapshot.
   The feed is chronological — ACTIVE items cluster near the end.
 
-  MATCH phase (per company, in-memory): fuzzy match by businessName +
-  municipal against Brreg legal name + municipality via RapidFuzz ≥ 80.
+  MATCH phase (per company, in-memory): require exact normalized businessName
+  and municipality equality with an unambiguous Brreg legal name. The feed has
+  no organisation number, so fuzzy/near-name matches are never published.
 
   The feed has NO orgnr field — matching is name-based only.
 
@@ -37,11 +38,6 @@ try:
 except ImportError as exc:
     raise RuntimeError("requests is required; install the pinned project dependencies with uv sync") from exc
 
-try:
-    from rapidfuzz import fuzz
-except ImportError as exc:
-    raise RuntimeError("rapidfuzz is required; install the pinned project dependencies with uv sync") from exc
-
 log = logging.getLogger("nav_workforce")
 
 NAV_TOKEN_URL = "https://pam-stilling-feed.nav.no/api/publicToken"
@@ -49,7 +45,7 @@ NAV_FEED_URL = "https://pam-stilling-feed.nav.no/api/v1/feed"
 NAV_BASE_URL = "https://pam-stilling-feed.nav.no"
 NAV_STILLING_URL = "https://arbeidsplassen.nav.no/stillinger/stilling/{uuid}"
 USER_AGENT = "signalpost-research/1.0"
-MATCH_THRESHOLD = 80
+MATCH_THRESHOLD = 100
 
 
 # ---------------------------------------------------------------------------
@@ -255,24 +251,43 @@ def _normalize_name(name: str) -> str:
 
 def load_brreg_collisions(bulk_path: str) -> set[str]:
     import csv, gzip
+    from pathlib import Path
+
     counts = defaultdict(int)
     log.info("Loading brreg bulk file to find name collisions...")
-    opener = gzip.open if str(bulk_path).endswith('.gz') else open
-    mode = 'rt' if str(bulk_path).endswith('.gz') else 'r'
-    try:
-        with opener(bulk_path, mode, encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter=';')
-            try:
-                next(reader) # skip header
-            except StopIteration:
-                pass
-            for row in reader:
-                if len(row) > 1:
-                    norm = _normalize_name(row[1])
-                    if norm:
-                        counts[norm] += 1
-    except Exception as e:
-        log.warning(f"Could not load brreg bulk file for collisions: {e}")
+    source = Path(bulk_path)
+    with source.open("rb") as raw:
+        is_gzip = raw.read(2) == b"\x1f\x8b"
+    opener = gzip.open if is_gzip else open
+    with opener(source, "rt", encoding="utf-8-sig", newline="") as handle:
+        sample = handle.read(8192)
+        if not sample.strip():
+            raise ValueError(f"Brreg collision snapshot is empty: {source}")
+        handle.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=";,\t")
+        except csv.Error as exc:
+            raise ValueError(f"Could not detect Brreg CSV delimiter: {source}") from exc
+
+        reader = csv.DictReader(handle, dialect=dialect)
+        if not reader.fieldnames:
+            raise ValueError(f"Brreg collision snapshot has no header: {source}")
+        normalized_headers = {
+            "".join(character for character in str(name).casefold() if character.isalnum()): name
+            for name in reader.fieldnames
+        }
+        name_column = next((
+            normalized_headers[key]
+            for key in ("navn", "name", "foretaksnavn", "legalname")
+            if key in normalized_headers
+        ), None)
+        if name_column is None:
+            raise ValueError(f"Brreg collision snapshot has no recognized company-name column: {source}")
+
+        for row in reader:
+            norm = _normalize_name(str(row.get(name_column) or ""))
+            if norm:
+                counts[norm] += 1
     collisions = {name for name, count in counts.items() if count > 1}
     log.info(f"Loaded brreg bulk file: found {len(collisions)} names with collisions.")
     return collisions
@@ -293,6 +308,8 @@ def match_company(
     collisions: set[str],
     threshold: int = MATCH_THRESHOLD,
 ) -> list[dict[str, Any]]:
+    if threshold != MATCH_THRESHOLD:
+        raise ValueError("NAV job publication requires an exact normalized-name match (threshold 100)")
     norm_name = _normalize_name(company_name)
     muni_upper = (company_municipality or "").strip().upper()
     matches: list[dict[str, Any]] = []
@@ -302,34 +319,14 @@ def match_company(
     candidates = index.get(muni_upper, []) if muni_upper else []
     for item in candidates:
         biz_norm = _normalize_name(item.get("businessName", ""))
-        if not biz_norm or not norm_name:
+        if not biz_norm or not norm_name or biz_norm != norm_name:
             continue
-
-        # Use token_sort_ratio (order-insensitive but requires all tokens to
-        # contribute) instead of token_set_ratio (which ignores missing tokens
-        # and causes false matches like "ORBIT CONSULTING" vs "Opv Consulting").
-        sort_score = fuzz.token_sort_ratio(norm_name, biz_norm)
-        # Also compute plain ratio for short names
-        plain_score = fuzz.ratio(norm_name, biz_norm)
-        score = max(sort_score, plain_score)
-
-        # Additional guard: the Brreg name tokens must be substantially present
-        # in the feed name.  This catches cases where a short common word
-        # (e.g. "Steinkjer") inflates the score against a long Brreg name.
-        brreg_tokens = set(norm_name.split())
-        feed_tokens = set(biz_norm.split())
-        if brreg_tokens and len(brreg_tokens) > 1:
-            overlap = len(brreg_tokens & feed_tokens)
-            coverage = overlap / len(brreg_tokens)
-            if coverage < 0.6:
-                continue  # Too many Brreg tokens missing from feed name
-
-        if score >= threshold and item["uuid"] not in seen:
+        if norm_name in collisions:
+            log.info(f"Ambiguous match quarantined: {norm_name} has multiple entries in Brreg.")
+            continue
+        if item["uuid"] not in seen:
             seen.add(item["uuid"])
-            if norm_name in collisions:
-                log.info(f"Ambiguous match quarantined: {norm_name} has multiple entries in Brreg.")
-                continue # Skip this item as it is ambiguous
-            matches.append({**item, "match_score": score, "match_method": "name+municipality"})
+            matches.append({**item, "match_score": 100.0, "match_method": "exact_normalized_name+municipality"})
 
     return matches
 
@@ -368,7 +365,7 @@ def build_observation(
         "content_sha256": snapshot_hash,
         "exact_entity": True,
         "identity_proof": [{
-            "type": "fuzzy_name_municipality_match",
+            "type": "exact_normalized_name_municipality_match",
             "value": {
                 "brreg_name": company_name,
                 "feed_businessName": best["businessName"],
@@ -414,7 +411,8 @@ def main() -> None:
     parser.add_argument("--observations-output", required=True)
     parser.add_argument("--report-output", required=True)
     parser.add_argument("--ledger", default="evidence_ledger.jsonl")
-    parser.add_argument("--threshold", type=int, default=MATCH_THRESHOLD)
+    parser.add_argument("--threshold", type=int, choices=[MATCH_THRESHOLD], default=MATCH_THRESHOLD,
+                        help="Only exact normalized company-name matching (100) is allowed")
     parser.add_argument("--max-pages", type=int, default=0,
                         help="Maximum pages for a deliberate partial prefetch; 0 fetches until exhausted")
     parser.add_argument("--fetch-only", action="store_true",
@@ -527,8 +525,8 @@ def main() -> None:
         "total_job_postings_matched": sum(r.get("job_count", 0) for r in match_results),
         "match_threshold": args.threshold,
         "claim_boundary": (
-            "NAV arbeidsplassen.no public stilling-feed; consumer-side "
-            f"RapidFuzz name+municipality matching >= {args.threshold}; no employer orgnr in feed."
+            "NAV arbeidsplassen.no public stilling-feed; exact normalized legal-name and municipality match, "
+            "quarantined when the legal name is duplicated in the supplied Brreg snapshot; the feed contains no employer orgnr."
         ),
         "company_results": match_results[:20],
     }
