@@ -1,54 +1,38 @@
 @echo off
+setlocal EnableExtensions
+cd /d "%~dp0"
+
 echo =======================================================
-echo Signalpost V1 - Final Qualification Audit
+echo Signalpost - reproducible local submission smoke test
 echo =======================================================
 echo.
 
-set PYTHON=.\.venv\Scripts\python.exe
-
-if not exist %PYTHON% (
-    echo [ERROR] Virtual environment not found at .venv
-    exit /b 1
-)
-
-if not exist "out\nav-feed-snapshot.json.gz" (
-    echo [ERROR] NAV feed snapshot is missing. Waiting for fetch to complete...
-    exit /b 1
-)
-
-echo [1/3] Running final submission runner...
-%PYTHON% scripts\run_signalpost_submission.py ^
-    --organisations out\smoke-profiles.jsonl ^
-    --bulk false ^
-    --expected-count 100 ^
-    --output out\submission-envelopes-final.jsonl ^
-    --report out\submission-report-final.json ^
-    --viewer out\submission-viewer-final.html ^
-    --run-id submission-final ^
-    --nav-snapshot out\nav-feed-snapshot.json.gz
-
-if %errorlevel% neq 0 (
-    echo [ERROR] Submission runner failed.
-    exit /b %errorlevel%
-)
+echo [1/3] Installing the locked default environment...
+uv sync --locked
+if errorlevel 1 goto :failed
 
 echo.
-echo [2/3] Simulating Builderr qualification gate...
-%PYTHON% scripts\score_competition_v3.py ^
-    --profiles out\submission-run\base-profiles.jsonl ^
-    --external-report out\submission-run\nav-report.json ^
-    --batch-report out\submission-report-final.json ^
-    --refresh-report out\submission-report-final.json ^
-    --research-report out\submission-report-final.json ^
-    --ux-report out\submission-report-final.json ^
-    --output out\simulated-score.json
+echo [2/3] Running the test suite...
+uv run --locked --with pytest pytest -q
+if errorlevel 1 goto :failed
 
 echo.
-echo [3/3] Creating submission archive...
-powershell -Command "Compress-Archive -Path 'out\submission-envelopes-final.jsonl', 'out\submission-viewer-final.html', 'out\submission-report-final.json' -DestinationPath 'out\Signalpost_Submission.zip' -Force"
+echo [3/3] Running the documented submission entrypoint...
+uv run --locked python scripts\run_signalpost_submission.py ^
+    --organisations smoke-companies.jsonl ^
+    --bulk brreg-enheter.csv ^
+    --output out\submission-envelopes.jsonl ^
+    --report out\submission-report.json ^
+    --viewer out\submission-viewer.html ^
+    --run-id submission-smoke ^
+    --out-dir out\submission-smoke-run
+if errorlevel 1 goto :failed
 
 echo.
-echo =======================================================
-echo SUCCESS! 
-echo Your submission archive is ready at: out\Signalpost_Submission.zip
-echo =======================================================
+echo SUCCESS: validation details are in out\submission-report.json
+exit /b 0
+
+:failed
+echo.
+echo ERROR: the smoke test failed. See the command output above.
+exit /b 1

@@ -101,6 +101,13 @@ uv sync --locked
 uv run python scripts/run_signalpost_submission.py --organisations smoke-companies.jsonl --bulk brreg-enheter.csv --output out/submission-envelopes.jsonl --report out/submission-report.json --viewer out/submission-viewer.html --run-id smoke-submission-001 --expected-count 100 --out-dir out/smoke-submission-run
 ```
 
+On Windows, `finalize_submission.bat` automates this same local smoke check
+(locked install, tests, then this entrypoint). It is a convenience check, not
+an alternate evaluator interface. Historical `run_v2.py`, `compile_v3.py`,
+`compile_v4.py`, and `scripts/normalize_social_links.py` are intentionally
+retired and fail closed: they predate the precision policy and must never be
+used to produce a submission.
+
 The invocation above is a 100-row smoke example. The evaluator may supply a larger
 batch. The runner derives the expected count from the supplied input and processes every
 organisation; `--expected-count` is optional and only emits a warning when it differs.

@@ -1638,6 +1638,10 @@ class PrototypeTests(unittest.TestCase):
                         "discovered_social_links": [
                             {"platform": "linkedin", "url": "https://linkedin.com/company/parent"}
                         ],
+                        "structured_organisations": [{
+                            "name": "Parent platform template",
+                            "sameAs": ["https://twitter.com/squarespace"],
+                        }],
                     },
                 )
             },
@@ -1645,6 +1649,8 @@ class PrototypeTests(unittest.TestCase):
         website = compact_prototype(row)["web"]["value"]
         self.assertEqual(website["quarantined_social_count"], 1)
         self.assertEqual(website["social_links"], [])
+        self.assertNotIn("sameAs", json.dumps(website))
+        self.assertNotIn("squarespace", json.dumps(website).casefold())
 
     def test_places_layer_requires_approved_licensed_exact_observation(self):
         row = {

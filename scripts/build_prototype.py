@@ -4,12 +4,44 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import urllib.parse
 from collections import defaultdict
 from pathlib import Path
 
 
 def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+_SOCIAL_HOSTS = {
+    "facebook.com", "instagram.com", "linkedin.com", "tiktok.com", "twitter.com", "x.com", "youtube.com",
+}
+
+
+def _is_social_url(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    host = urllib.parse.urlparse(value).netloc.casefold().split(":", 1)[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return any(host == domain or host.endswith(f".{domain}") for domain in _SOCIAL_HOSTS)
+
+
+def _strip_social_discovery_artifacts(value: object) -> object:
+    """Keep the standalone viewer safe when launched from any working directory."""
+    if isinstance(value, dict):
+        cleaned: dict[str, object] = {}
+        for key, child in value.items():
+            normalized_key = str(key).replace("_", "").casefold()
+            if normalized_key in {"sameas", "sociallinks", "discoveredsociallinks", "sociallinkassessments"}:
+                continue
+            if normalized_key in {"url", "profileurl", "link"} and _is_social_url(child):
+                continue
+            cleaned[key] = _strip_social_discovery_artifacts(child)
+        return cleaned
+    if isinstance(value, list):
+        return [_strip_social_discovery_artifacts(child) for child in value]
+    return value
 
 
 def normalize_independent_score(independent_score: dict | None) -> dict:
@@ -97,6 +129,11 @@ def compact(row: dict, external_observations: list[dict] | None = None) -> dict:
         website_value["quarantined_social_count"] = int(website_value.get("withheld_social_link_count") or len(website_value.get("discovered_social_links") or []))
         website_value["title"] = "Registry-linked site — identity not verified"
         website_value["description"] = "Fetched content is retained as discovered evidence but is not attributed to this legal entity."
+    # The viewer is a public evidence artifact, not a back door for raw crawl
+    # metadata. Apply the same recursive quarantine as the JSONL contract so a
+    # template's JSON-LD ``sameAs`` URL cannot appear in exported viewer data.
+    website_value = _strip_social_discovery_artifacts(website_value)
+    website_value["social_links"] = []
     live = evidence.get("registry_live", {})
     accounting = evidence.get("accounting_obligation", {})
     external_observations = external_observations or []

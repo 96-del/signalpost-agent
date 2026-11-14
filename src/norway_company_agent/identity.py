@@ -184,7 +184,7 @@ def assess_social_identity(profile: dict[str, Any], link: dict[str, str]) -> dic
     }
 
 
-def _strip_social_discovery_artifacts(value: Any) -> Any:
+def strip_social_discovery_artifacts(value: Any) -> Any:
     """Remove unpublished social references from arbitrary website metadata.
 
     JSON-LD `sameAs` fields are especially risky: template defaults can name the
@@ -204,10 +204,10 @@ def _strip_social_discovery_artifacts(value: Any) -> Any:
                 continue
             if normalized_key in {"url", "profileurl", "link"} and isinstance(child, str) and normalize_social_url(child):
                 continue
-            result[key] = _strip_social_discovery_artifacts(child)
+            result[key] = strip_social_discovery_artifacts(child)
         return result
     if isinstance(value, list):
-        return [_strip_social_discovery_artifacts(child) for child in value]
+        return [strip_social_discovery_artifacts(child) for child in value]
     return value
 
 
@@ -227,7 +227,7 @@ def apply_website_identity_gate(profile: dict[str, Any], website: dict[str, Any]
     value.pop("discovered_social_links", None)
     value.pop("social_link_assessments", None)
     value["social_links"] = []
-    value["structured_organisations"] = _strip_social_discovery_artifacts(
+    value["structured_organisations"] = strip_social_discovery_artifacts(
         value.get("structured_organisations") or []
     )
     value["withheld_social_link_count"] = len(original)
