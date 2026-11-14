@@ -5,6 +5,8 @@ import unicodedata
 import urllib.parse
 from typing import Any
 
+from .website import normalize_social_url
+
 
 LEGAL_AND_GENERIC = {
     "as", "asa", "ans", "da", "enk", "iks", "sa", "sam", "sti", "stiftelsen",
@@ -182,6 +184,33 @@ def assess_social_identity(profile: dict[str, Any], link: dict[str, str]) -> dic
     }
 
 
+def _strip_social_discovery_artifacts(value: Any) -> Any:
+    """Remove unpublished social references from arbitrary website metadata.
+
+    JSON-LD `sameAs` fields are especially risky: template defaults can name the
+    site provider rather than the legal entity. They must not bypass the social
+    claim quarantine merely by being nested inside structured organization data.
+    """
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            normalized_key = str(key).replace("_", "").casefold()
+            if normalized_key in {
+                "sameas",
+                "sociallinks",
+                "discoveredsociallinks",
+                "sociallinkassessments",
+            }:
+                continue
+            if normalized_key in {"url", "profileurl", "link"} and isinstance(child, str) and normalize_social_url(child):
+                continue
+            result[key] = _strip_social_discovery_artifacts(child)
+        return result
+    if isinstance(value, list):
+        return [_strip_social_discovery_artifacts(child) for child in value]
+    return value
+
+
 def apply_website_identity_gate(profile: dict[str, Any], website: dict[str, Any]) -> dict[str, Any]:
     if website.get("status") != "available":
         return {"website": website, "assessment": None, "quarantined_social_links": 0}
@@ -198,6 +227,9 @@ def apply_website_identity_gate(profile: dict[str, Any], website: dict[str, Any]
     value.pop("discovered_social_links", None)
     value.pop("social_link_assessments", None)
     value["social_links"] = []
+    value["structured_organisations"] = _strip_social_discovery_artifacts(
+        value.get("structured_organisations") or []
+    )
     value["withheld_social_link_count"] = len(original)
     website["value"] = value
     return {

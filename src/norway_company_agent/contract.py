@@ -311,8 +311,26 @@ def _published_claim_value(field: str, value: Any) -> Any:
     """
     if field != "website" or not isinstance(value, dict):
         return value
-    hidden = {"social_links", "discovered_social_links", "social_link_assessments"}
-    return {key: child for key, child in value.items() if key not in hidden}
+
+    def scrub(child: Any) -> Any:
+        if isinstance(child, dict):
+            result = {}
+            for key, nested in child.items():
+                normalized_key = str(key).replace("_", "").casefold()
+                if normalized_key in {
+                    "sameas",
+                    "sociallinks",
+                    "discoveredsociallinks",
+                    "sociallinkassessments",
+                }:
+                    continue
+                result[key] = scrub(nested)
+            return result
+        if isinstance(child, list):
+            return [scrub(item) for item in child]
+        return child
+
+    return scrub(value)
 
 
 def _published_record(field: str, record: dict[str, Any]) -> dict[str, Any]:

@@ -2014,6 +2014,10 @@ class StableEvidenceIdTests(unittest.TestCase):
                         "identity_assessment": {"publishable": True},
                         "social_links": [{"platform": "x", "url": raw_social}],
                         "discovered_social_links": [{"platform": "x", "url": raw_social}],
+                        "structured_organisations": [{
+                            "legalName": "Lowehjerte Design AS",
+                            "sameAs": [raw_social, "https://www.linkedin.com/company/squarespace/mycompany/verification/"],
+                        }],
                     }, content_sha256="a" * 64, retrieved_at="2026-11-13T00:00:00Z",
                 ),
             },
@@ -2040,6 +2044,7 @@ class StableEvidenceIdTests(unittest.TestCase):
         )
         serialized = json.dumps(envelope, ensure_ascii=False)
         self.assertNotIn("squarespace", serialized.casefold())
+        self.assertNotIn("sameAs", serialized)
         self.assertFalse(any("social_links" in change["field"] for change in envelope["changes"]))
         self.assertTrue(validate_output_envelopes([envelope], ["100000001"])["passed"])
 
