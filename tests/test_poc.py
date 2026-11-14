@@ -35,7 +35,7 @@ from norway_company_agent.external_footprint import aggregate_footprint, publish
 from norway_company_agent.external_tasks import plan_external_tasks  # noqa: E402
 from norway_company_agent.external_control import development_score, run_company_control, strategy_order  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate, assess_social_identity, assess_website_identity  # noqa: E402
-from norway_company_agent.website import _REQUEST_LOCAL, SafeRedirectHandler, _extraction_state, _fetch_secondary_page, _priority_links, _robots_allowed, _social_links, assert_public_url, fetch_website, identity_text_excerpt, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
+from norway_company_agent.website import _REQUEST_LOCAL, SafeRedirectHandler, _extraction_state, _fetch_secondary_page, _priority_links, _robots_allowed, _same_host_detail_links, _sitemap_detail_links, _social_links, assert_public_url, extract_job_posting_metadata, fetch_website, identity_text_excerpt, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.snapshots import SnapshotFetcher  # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
@@ -50,6 +50,7 @@ from scripts.run_sentiment_model import MODEL_REVISION, normalize_generated_labe
 from scripts.score_company_completeness import score_rows, summarize  # noqa: E402
 from scripts.extract_company_site_activity import observation as site_activity_observation  # noqa: E402
 from scripts.extract_company_site_news import observation as site_news_observation  # noqa: E402
+from scripts.extract_company_site_jobs import observation as site_jobs_observation  # noqa: E402
 from scripts.build_verified_observations import build as build_verified_observations  # noqa: E402
 from scripts.run_google_news_rss_connector import exact_title_match  # noqa: E402
 from scripts.run_linkedin_guest_jobs_connector import canonical_company_url, parse_detail_company_urls, parse_job_cards, parse_typeahead  # noqa: E402
@@ -663,6 +664,7 @@ class CompletenessScoreTests(unittest.TestCase):
         item = site_news_observation(profile)
         self.assertEqual(item["signal_type"], "public_post")
         self.assertEqual(item["metrics"]["published_at"], "2026-08-21")
+        self.assertEqual(item["metrics"]["article_headline"], "New contract")
         self.assertIn("announced a new contract", item["evidence_span"])
         self.assertTrue(publishable_observation(item))
         profile["evidence"]["website"]["value"]["pages"][0]["url"] = "https://example.test/contact"
@@ -705,6 +707,76 @@ class CompletenessScoreTests(unittest.TestCase):
         self.assertEqual(item["metrics"]["published_at"], "2025-11-14")
         self.assertIn("company-news/", item["source_url"])
         self.assertTrue(publishable_observation(item))
+
+    def test_company_site_job_requires_direct_open_exact_company_detail(self):
+        profile = {
+            "name": "Example Design AS", "organisation_number": "923609016",
+            "evidence": {"website": {
+                "status": "available", "retrieved_at": "2026-11-14T00:00:00Z",
+                "value": {
+                    "identity_assessment": {"publishable": True, "score": 1.0, "method": "test"},
+                    "pages": [{
+                        "url": "https://example.test/karriere/senior-designer",
+                        "title": "Senior designer", "job_title": "Senior designer",
+                        "job_posting_structured": True, "job_date_posted": "2026-11-01",
+                        "job_valid_through": "2026-12-01", "job_hiring_organization": "Example Design AS",
+                        "job_application_signal": True,
+                        "main_text_excerpt": "Join Example Design AS as a senior designer. " * 10,
+                        "content_sha256": "c" * 64,
+                    }],
+                },
+            }},
+        }
+        item = site_jobs_observation(profile)
+        self.assertIsNotNone(item)
+        self.assertEqual(item["metrics"]["job_title"], "Senior designer")
+        self.assertEqual(item["metrics"]["application_deadline"], "2026-12-01")
+        self.assertTrue(publishable_observation(item))
+
+        profile["evidence"]["website"]["value"]["pages"][0]["job_valid_through"] = "2026-10-01"
+        self.assertIsNone(site_jobs_observation(profile))
+        profile["evidence"]["website"]["value"]["pages"][0]["job_valid_through"] = "2026-12-01"
+        profile["evidence"]["website"]["value"]["pages"][0]["job_hiring_organization"] = "Parent Group ASA"
+        self.assertIsNone(site_jobs_observation(profile))
+        profile["evidence"]["website"]["value"]["pages"][0]["job_hiring_organization"] = "Example Design AS"
+        profile["evidence"]["website"]["value"]["pages"][0]["job_posting_structured"] = False
+        self.assertIsNone(site_jobs_observation(profile))
+
+    def test_detail_candidate_requires_same_host_non_generic_route(self):
+        soup = BeautifulSoup(
+            '<a href="/news/">News index</a><a href="/news/launch">Launch</a><a href="https://other.test/news/story">Other</a>',
+            "lxml",
+        )
+        self.assertEqual(
+            _same_host_detail_links("https://example.test/news", soup, route_terms={"news"}),
+            ["https://example.test/news/launch"],
+        )
+        page = BeautifulSoup(
+            '''<script type="application/ld+json">{"@context":"https://schema.org","@type":"JobPosting","title":"Designer","datePosted":"2026-11-01","validThrough":"2026-12-01","hiringOrganization":{"name":"Example Design AS"}}</script><a href="/apply">Apply now</a>''',
+            "lxml",
+        )
+        metadata = extract_job_posting_metadata(page, "Role description")
+        self.assertTrue(metadata["job_posting_structured"])
+        self.assertEqual(metadata["job_title"], "Designer")
+        self.assertTrue(metadata["job_application_signal"])
+
+    def test_sitemap_detail_discovery_is_same_host_and_never_uses_an_index_as_pages(self):
+        urlset = b'''<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url><loc>https://example.test/news/launch</loc></url>
+          <url><loc>https://example.test/karriere/senior-designer</loc></url>
+          <url><loc>https://example.test/news/</loc></url>
+          <url><loc>https://other.test/news/wrong-company</loc></url>
+        </urlset>'''
+        self.assertEqual(
+            _sitemap_detail_links("https://example.test/sitemap.xml", urlset, route_terms={"news"}),
+            ["https://example.test/news/launch"],
+        )
+        self.assertEqual(
+            _sitemap_detail_links("https://example.test/sitemap.xml", urlset, route_terms={"karriere"}),
+            ["https://example.test/karriere/senior-designer"],
+        )
+        sitemap_index = b'''<?xml version="1.0"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><sitemap><loc>https://example.test/news-sitemap.xml</loc></sitemap></sitemapindex>'''
+        self.assertEqual(_sitemap_detail_links("https://example.test/sitemap.xml", sitemap_index, route_terms={"news"}), [])
 
     def test_verified_observations_require_known_org_and_snapshot_hash(self):
         profiles = [{"organisation_number": "923609016", "name": "Example AS"}]
@@ -1607,7 +1679,7 @@ class PrototypeTests(unittest.TestCase):
         }
         unsafe = {**safe, "rights_status": "review_required", "signal_type": "profile_metrics"}
         attach_company_site_evidence(profiles, [unsafe, safe])
-        activity = profiles[0]["evidence"].get("company_site_activity")
+        activity = profiles[0]["evidence"].get("company_news")
         self.assertIsNotNone(activity)
         self.assertEqual(activity["value"]["evidence_span"], "Product launch")
         self.assertNotIn("company_site_surface", profiles[0]["evidence"])
@@ -1929,6 +2001,66 @@ class StableEvidenceIdTests(unittest.TestCase):
         self.assertEqual(website_claim["availability"], "ambiguous")
         self.assertFalse(envelope["public_brand"]["verified"])
         self.assertEqual(availability("not_fetched"), "failed")
+
+    def test_contract_never_leaks_social_discovery_urls_or_refresh_changes(self):
+        raw_social = "https://twitter.com/squarespace"
+        old = {
+            "organisation_number": "100000001", "name": "Lowehjerte Design AS",
+            "evidence": {
+                "website": evidence(
+                    "website", "available", "registry_linked_company_website", "https://lowehjerte.no/",
+                    value={
+                        "final_url": "https://lowehjerte.no/", "title": "Lowehjerte Design AS",
+                        "identity_assessment": {"publishable": True},
+                        "social_links": [{"platform": "x", "url": raw_social}],
+                        "discovered_social_links": [{"platform": "x", "url": raw_social}],
+                    }, content_sha256="a" * 64, retrieved_at="2026-11-13T00:00:00Z",
+                ),
+            },
+        }
+        current = {
+            "organisation_number": "100000001", "name": "Lowehjerte Design AS",
+            "evidence": {
+                "website": evidence(
+                    "website", "available", "registry_linked_company_website", "https://lowehjerte.no/",
+                    value={
+                        "final_url": "https://lowehjerte.no/", "title": "Lowehjerte Design AS",
+                        "identity_assessment": {"publishable": True},
+                        "social_links": [], "withheld_social_link_count": 1,
+                    }, content_sha256="b" * 64, retrieved_at="2026-11-14T00:00:00Z",
+                ),
+            },
+        }
+        envelope = profile_to_contract(
+            current,
+            run_id="social-quarantine",
+            previous_profile=old,
+            started_at="2026-11-14T00:00:00Z",
+            completed_at="2026-11-14T00:00:01Z",
+        )
+        serialized = json.dumps(envelope, ensure_ascii=False)
+        self.assertNotIn("squarespace", serialized.casefold())
+        self.assertFalse(any("social_links" in change["field"] for change in envelope["changes"]))
+        self.assertTrue(validate_output_envelopes([envelope], ["100000001"])["passed"])
+
+    def test_synthesis_includes_direct_company_news_and_open_job(self):
+        profile = {
+            "organisation_number": "100000001", "name": "Example Design AS",
+            "evidence": {
+                "registry": evidence("registry", "available", "official_registry_bulk", "https://registry.example/100000001", value={"industry": "Design"}, content_sha256="a" * 64),
+                "company_news": evidence("company_news", "available", "company_site", "https://example.test/news/launch", value={"metrics": {"article_headline": "New studio", "published_at": "2026-11-01"}}, effective_at="2026-11-01", content_sha256="b" * 64),
+                "company_site_jobs": evidence("company_site_jobs", "available", "company_site", "https://example.test/careers/designer", value={"metrics": {"job_title": "Designer", "application_deadline": "2026-12-01"}}, content_sha256="c" * 64),
+            },
+        }
+        envelope = profile_to_contract(profile, run_id="synthesis-company-site")
+        synthesis = next(item for item in envelope["claims"] if item["field"] == "synthesis")
+        self.assertEqual(synthesis["value"]["latest_company_news"]["headline"], "New studio")
+        self.assertEqual(synthesis["value"]["open_job"]["title"], "Designer")
+        self.assertEqual(synthesis["value"]["open_job"]["application_deadline"], "2026-12-01")
+        self.assertEqual(synthesis["value"]["synthesis_version"], "evidence_grounded_company_summary_v2")
+        basis_fields = {item["field"] for item in synthesis["value"]["evidence_basis"]}
+        self.assertTrue({"registry", "company_news", "company_site_jobs"}.issubset(basis_fields))
+        self.assertTrue(all(item["source_url"] and item["retrieved_at"] for item in synthesis["value"]["evidence_basis"]))
 
     def test_synthesis_does_not_treat_ambiguous_parent_site_as_verified(self):
         profile = {

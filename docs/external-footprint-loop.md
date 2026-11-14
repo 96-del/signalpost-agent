@@ -7,9 +7,9 @@ resolve the exact legal entity across external sources, collect useful dated sig
 into a compact, evidence-backed view without confusing a parent, franchise, brand, location, or namesake.
 
 This document is an engineering research plan, **not** the competition scoring rubric. The official
-[Signalpost challenge page](https://builderr.ai/challenges/signalpost), checked 2026-10-16, sets the
-qualification bar at 65/100 on an official run and scores recall/coverage (50), precision/evidence (30),
-synthesis (12), and UX (8). Within recall/coverage, the page describes a 70% company-coverage and 30%
+[Signalpost challenge page](https://builderr.ai/challenges/signalpost), checked 2026-11-14, sets the
+qualification bar at 65/100 plus 95% correct checked claims on an official run and scores recall/coverage (50),
+precision/evidence (30), synthesis (12), and UX (8). Within recall/coverage, the page describes a 70% company-coverage and 30%
 checked-fact component for each information type. Builderr supplies the fresh evaluation batch. Local
 connector metrics below are diagnostics only and cannot predict official points.
 

@@ -2,8 +2,9 @@
 
 This document describes local connector research and validation gates; it does not define the
 competition rubric. The [Signalpost challenge page](https://builderr.ai/challenges/signalpost) is the
-source of truth. As checked on 2026-10-27, the official axes are recall and coverage (50), precision
-and evidence (30), synthesis (12), and UX (8), with qualification at 65/100 on an official run.
+source of truth. As checked on 2026-11-14, the official axes are recall and coverage (50), precision
+and evidence (30), synthesis (12), and UX (8), with qualification requiring both at least 65/100
+on an official run and at least 95% of checked claims to be correct.
 
 Individual connectors remain quarantined until their data rights, exact-entity precision, freshness,
 and held-out behavior are demonstrated. Planned or experimental output is not evidence of score gain.
@@ -24,6 +25,15 @@ equivalent explicitly named publication field. Generic `<time>` values, `dateMod
 times and `lastmod` are not publication evidence. A section page, menu label, undated page or
 product page remains a website page, not a news observation. Company-owned posts are never labeled
 independent sentiment.
+
+Company-site jobs are emitted only from an individual job-detail URL beneath a
+career/jobs section of an already verified company site. The page needs a
+structured `JobPosting`, a non-generic title, substantive extracted job text,
+a direct application signal or an unexpired explicit deadline, and an acceptable same-page hiring
+organisation signal when one is present. Generic careers pages, expired
+postings, recruiter/parent-labelled postings, third-party boards and unlinked
+menu labels are excluded. Each published item carries the direct page URL,
+retrieval time and page-content hash.
 
 These gates were added after the evaluator's 26 October audit note; they are quality safeguards, not
 a claim that every site or article has been independently adjudicated.

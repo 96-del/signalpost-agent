@@ -190,17 +190,18 @@ def apply_website_identity_gate(profile: dict[str, Any], website: dict[str, Any]
     assessment = assess_website_identity(temporary_profile)
     value["identity_assessment"] = assessment
     original = list(value.get("discovered_social_links") or value.get("social_links") or [])
-    value["discovered_social_links"] = original
-    social_assessments = [assess_social_identity(profile, link) for link in original]
-    value["social_link_assessments"] = social_assessments
-    value["social_links"] = [
-        {"platform": item["platform"], "url": item["url"]}
-        for item in social_assessments
-        if assessment["publishable"] and item["publishable"]
-    ]
+    # A link in a site footer is not sufficient proof that the third-party
+    # account belongs to this legal entity. In the last scored run, generic
+    # Squarespace links were published as if they belonged to a customer. Keep
+    # only aggregate diagnostics: no social URL is a public claim in this
+    # submission path until an account can be independently verified.
+    value.pop("discovered_social_links", None)
+    value.pop("social_link_assessments", None)
+    value["social_links"] = []
+    value["withheld_social_link_count"] = len(original)
     website["value"] = value
     return {
         "website": website,
         "assessment": assessment,
-        "quarantined_social_links": len(original) - len(value["social_links"]),
+        "quarantined_social_links": len(original),
     }

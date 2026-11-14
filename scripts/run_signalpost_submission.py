@@ -194,8 +194,8 @@ def attach_places_evidence(profiles: list[dict], observations: list[dict]) -> No
 
 def attach_company_site_evidence(profiles: list[dict], observations: list[dict]) -> None:
     field_for_signal = {
-        "profile_metrics": "company_site_surface",
-        "public_post": "company_site_activity",
+        "public_post": "company_news",
+        "job_posting": "company_site_jobs",
     }
     by_org = {str(profile["organisation_number"]): profile for profile in profiles}
     for observation in observations:
@@ -349,6 +349,8 @@ def run(args: argparse.Namespace) -> None:
     site_activity_report_path = out / "company-site-activity-report.json"
     site_news_path = out / "company-site-news.jsonl"
     site_news_report_path = out / "company-site-news-report.json"
+    site_jobs_path = out / "company-site-jobs.jsonl"
+    site_jobs_report_path = out / "company-site-jobs-report.json"
     nav_observations_path = out / "nav-observations.jsonl"
     nav_report_path = out / "nav-report.json"
 
@@ -426,12 +428,19 @@ def run(args: argparse.Namespace) -> None:
         "--output", str(site_news_path),
         "--report", str(site_news_report_path),
     )
+    site_jobs_command = command(
+        "scripts/extract_company_site_jobs.py",
+        "--profiles", str(crawled_profiles),
+        "--output", str(site_jobs_path),
+        "--report", str(site_jobs_report_path),
+    )
     site_errors = []
     site_reports: list[dict] = []
     site_observations: list[dict] = []
-    for extraction_command, observations_path, site_report_path in (
-        (site_activity_command, site_activity_path, site_activity_report_path),
-        (site_news_command, site_news_path, site_news_report_path),
+    for extraction_command, observations_path, site_report_path, field in (
+        (site_activity_command, site_activity_path, site_activity_report_path, "company_site_surface"),
+        (site_news_command, site_news_path, site_news_report_path, "company_news"),
+        (site_jobs_command, site_jobs_path, site_jobs_report_path, "company_site_jobs"),
     ):
         try:
             subprocess.run(extraction_command, cwd=ROOT, check=True)
@@ -447,7 +456,7 @@ def run(args: argparse.Namespace) -> None:
             site_errors.append(message)
             connector_errors.append({
                 "type": "connector_error",
-                "field": "company_site_activity" if observations_path == site_activity_path else "company_site_news",
+                "field": field,
                 "message": message,
             })
             write_jsonl(observations_path, [])
@@ -458,7 +467,8 @@ def run(args: argparse.Namespace) -> None:
     attach_company_site_evidence(profiles, site_observations)
     site_summary = {
         "surface": site_reports[0],
-        "activity": site_reports[1],
+        "news": site_reports[1],
+        "jobs": site_reports[2],
         "errors": site_errors,
     }
 
@@ -492,7 +502,7 @@ def run(args: argparse.Namespace) -> None:
             connector_errors.append({"type": "connector_error", "field": "workforce_jobs", "message": nav_summary["error"]})
 
     places_summary: dict | None = None
-    external_paths: list[str] = [str(site_activity_path), str(site_news_path)]
+    external_paths: list[str] = [str(site_activity_path), str(site_news_path), str(site_jobs_path)]
     api_key = os.environ.get("GOOGLE_PLACES_API_KEY", "")
     rights_approved = os.environ.get("SIGNALPOST_GOOGLE_PLACES_RIGHTS", "").casefold() == "approved"
     places_enabled = bool(api_key and rights_approved)
@@ -640,7 +650,7 @@ def run(args: argparse.Namespace) -> None:
         "configured_expected_count": configured_expected_count,
         "expected_count_warning": (
             f"Configured count {configured_expected_count} differed from input count {len(organisations)}; processed every supplied row."
-            if configured_expected_count != len(organisations) else None
+            if configured_expected_count is not None and configured_expected_count != len(organisations) else None
         ),
         "claim_boundary": (
             "Official Brreg evidence plus robots-aware crawling of registry-linked company sites. "
@@ -663,7 +673,10 @@ def main() -> None:
     parser.add_argument("--report", required=True)
     parser.add_argument("--viewer", required=True, help="Inspectable static HTML evidence browser")
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--expected-count", type=int, required=True)
+    # The evaluator owns the batch size. The runner derives it from the input
+    # so a copied command cannot silently drop or reject a differently sized
+    # official batch. Keep this optional flag solely as a caller sanity check.
+    parser.add_argument("--expected-count", type=int)
     parser.add_argument("--previous-profiles", help="Optional prior-run JSONL profiles for refresh diffs")
     parser.add_argument("--out-dir", default="out/submission-run")
     parser.add_argument("--workers", type=int, default=8)

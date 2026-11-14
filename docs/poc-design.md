@@ -56,10 +56,10 @@ the snapshot ETag/hash and seed.
 
 ## Score and control loop
 
-The [official challenge page](https://builderr.ai/challenges/signalpost), checked 2026-10-16, is the
-source of truth: qualification requires at least 65/100 on an official run, scored across recall/coverage
-(50), precision/evidence (30), synthesis (12), and UX (8). Builderr supplies the evaluation batch; local
-proxy scores do not qualify an entry or predict its official score. Within recall/coverage, the page says
+The [official challenge page](https://builderr.ai/challenges/signalpost), checked 2026-11-14, is the
+source of truth: qualification requires at least 65/100 and 95% correct checked claims on an official run,
+scored across recall/coverage (50), precision/evidence (30), synthesis (12), and UX (8). Builderr supplies
+the evaluation batch; local proxy scores do not qualify an entry or predict its official score. Within recall/coverage, the page says
 70% of each information type's coverage score is based on company reach and 30% on the number of checked
 facts found.
 

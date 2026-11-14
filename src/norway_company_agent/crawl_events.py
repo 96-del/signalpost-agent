@@ -8,7 +8,20 @@ import trafilatura
 from bs4 import BeautifulSoup
 
 from .evidence import evidence, utc_now
-from .website import _extraction_state, _jsonld_organisations, _registered_domain, _social_links, extract_published_metadata, identity_text_excerpt, normalize_homepage, structured_social_links
+from .website import (
+    JOB_ROUTE_TERMS,
+    NEWS_ROUTE_TERMS,
+    _extraction_state,
+    _jsonld_organisations,
+    _registered_domain,
+    _same_host_detail_links,
+    _social_links,
+    extract_job_posting_metadata,
+    extract_published_metadata,
+    identity_text_excerpt,
+    normalize_homepage,
+    structured_social_links,
+)
 
 
 def extract_page_event(
@@ -52,6 +65,7 @@ def extract_page_event(
         "main_text_excerpt": text[:5000],
         "identity_text_excerpt": identity_text,
         **extract_published_metadata(soup),
+        **extract_job_posting_metadata(soup, text),
         "social_links": _social_links(final_url, soup),
         "extraction_state": _extraction_state(text, soup),
     }
@@ -61,6 +75,12 @@ def extract_page_event(
         combined_social = event["social_links"] + structured_social_links(event["structured_organisations"])
         event["social_links"] = list({(item["platform"], item["url"]): item for item in combined_social}.values())
         event["registered_domain"] = _registered_domain(final_url)
+    event["news_detail_candidates"] = _same_host_detail_links(
+        final_url, soup, route_terms=NEWS_ROUTE_TERMS,
+    )
+    event["job_detail_candidates"] = _same_host_detail_links(
+        final_url, soup, route_terms=JOB_ROUTE_TERMS,
+    )
     return event
 
 
@@ -139,6 +159,12 @@ def merge_profile_events(profile: dict[str, Any], events: list[dict[str, Any]]) 
             "published_at": item.get("published_at"),
             "article_type": item.get("article_type"),
             "article_headline": item.get("article_headline"),
+            "job_posting_structured": item.get("job_posting_structured"),
+            "job_title": item.get("job_title"),
+            "job_date_posted": item.get("job_date_posted"),
+            "job_valid_through": item.get("job_valid_through"),
+            "job_hiring_organization": item.get("job_hiring_organization"),
+            "job_application_signal": item.get("job_application_signal"),
             "content_sha256": item.get("content_sha256"),
         }
         unique_pages[item.get("final_url")] = page

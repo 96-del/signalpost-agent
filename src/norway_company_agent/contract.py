@@ -302,6 +302,25 @@ def _span(record: dict[str, Any]) -> str | None:
     return _dumps(value)[:1000]
 
 
+def _published_claim_value(field: str, value: Any) -> Any:
+    """Remove non-claim discovery artifacts from the public contract.
+
+    Website evidence can contain raw footer links while it is being processed.
+    A third-party profile URL must not become a company claim just because it
+    appeared in that HTML. The runner currently withholds all social profiles.
+    """
+    if field != "website" or not isinstance(value, dict):
+        return value
+    hidden = {"social_links", "discovered_social_links", "social_link_assessments"}
+    return {key: child for key, child in value.items() if key not in hidden}
+
+
+def _published_record(field: str, record: dict[str, Any]) -> dict[str, Any]:
+    if field != "website" or not isinstance(record.get("value"), dict):
+        return record
+    return {**record, "value": _published_claim_value(field, record["value"])}
+
+
 def _reporting_period(record: dict[str, Any], field: str) -> str | None:
     """Expose the actual filing/publication period when the source has one."""
     explicit = record.get("as_of") or record.get("effective_at")
@@ -360,6 +379,8 @@ def profile_to_contract(
         if not isinstance(record, dict):
             continue
 
+        record = _published_record(str(field), record)
+
         # Evidence identity must remain stable when the same
         # source/content is retrieved again at a different time.
         #
@@ -402,7 +423,7 @@ def profile_to_contract(
         evidence_ids[field] = ev_id
 
         state = availability(record.get("status"))
-        claim_value = record.get("value")
+        claim_value = _published_claim_value(str(field), record.get("value"))
 
         # A registry-linked website is not automatically attributable
         # to the legal entity. If identity verification fails, expose
@@ -501,8 +522,21 @@ def profile_to_contract(
         else:
             registered_activity = None
 
+        official_activity = (profile_evidence.get("registry") or {}).get("value") or {}
+        purpose = (
+            official_activity.get("aktivitet")
+            if isinstance(official_activity, dict)
+            else None
+        ) or (
+            official_activity.get("vedtektsfestetFormaal")
+            if isinstance(official_activity, dict)
+            else None
+        )
+
         if description:
             what_it_does = description
+        elif purpose:
+            what_it_does = f"Registered activity: {purpose}."
         elif registered_activity:
             what_it_does = (
                 f"Registered activity: {registered_activity}."
@@ -530,7 +564,7 @@ def profile_to_contract(
             unknown.append(
                 "No verified company website was attributed to this legal entity in this run."
             )
-        if "workforce_jobs" not in profile_evidence:
+        if "workforce_jobs" not in profile_evidence and "company_site_jobs" not in profile_evidence:
             unknown.append(
                 "No exact-company job posting was verified in this run."
             )
@@ -544,7 +578,56 @@ def profile_to_contract(
                 "external jobs and place coverage remain opportunity-dependent."
             )
 
+        # Keep the prose intentionally modest, but expose the individual
+        # evidence-backed facts used to form it. This lets a reviewer verify a
+        # conclusion without guessing which source family supplied it.
+        evidence_basis: list[dict[str, Any]] = []
+
+        def add_basis(field: str, statement: str) -> None:
+            record = profile_evidence.get(field) or {}
+            evidence_id = evidence_ids.get(field)
+            if record.get("status") == "available" and evidence_id:
+                evidence_basis.append({
+                    "field": field,
+                    "statement": statement,
+                    "evidence_id": evidence_id,
+                    "source_url": record.get("source_url"),
+                    "retrieved_at": record.get("retrieved_at"),
+                })
+
+        if purpose:
+            add_basis("registry", "Registered activity or stated purpose was used for the company description.")
+        elif registered_activity:
+            add_basis("registry_live" if (profile_evidence.get("registry_live") or {}).get("status") == "available" else "registry", "Registered industry was used for the company description.")
+
+        if verified_website and description:
+            add_basis("website", "Verified company-site description was used for the company description.")
+
+        financial_records = (financials.get("value") or {}).get("records") or []
+        latest_financial = next(
+            (
+                item for item in sorted(
+                    (item for item in financial_records if isinstance(item, dict)),
+                    key=lambda item: str((item.get("period") or {}).get("tilDato") or ""),
+                    reverse=True,
+                )
+            ),
+            None,
+        )
+        if latest_financial:
+            period_end = (latest_financial.get("period") or {}).get("tilDato")
+            add_basis("financials", f"Latest filed financial record ends {period_end or 'on an unreported date'}.")
+
+        active_roles = [
+            item for item in ((profile_evidence.get("roles") or {}).get("value") or {}).get("roles") or []
+            if isinstance(item, dict) and not item.get("inactive") and isinstance(item.get("name"), str) and item.get("name")
+        ]
+        if active_roles:
+            first_role = active_roles[0]
+            add_basis("roles", f"Current registered role: {first_role['name']} ({first_role.get('role') or first_role.get('group') or 'role'}).")
+
         synthesis = {
+            "synthesis_version": "evidence_grounded_company_summary_v2",
             "what_it_does": what_it_does,
             "what_changed": (
                 "No prior snapshot was supplied for comparison."
@@ -563,7 +646,27 @@ def profile_to_contract(
                 )
             ),
             "what_is_unknown": unknown,
+            "evidence_basis": evidence_basis,
         }
+
+        news = profile_evidence.get("company_news") or {}
+        if news.get("status") == "available":
+            news_metrics = (news.get("value") or {}).get("metrics") or {}
+            synthesis["latest_company_news"] = {
+                "headline": news_metrics.get("article_headline") or news_metrics.get("headline"),
+                "published_at": news_metrics.get("published_at"),
+                "source": news.get("source_url"),
+            }
+            add_basis("company_news", "Latest company-owned dated news item is shown separately from independent coverage.")
+        jobs = profile_evidence.get("company_site_jobs") or profile_evidence.get("workforce_jobs") or {}
+        if jobs.get("status") == "available":
+            job_metrics = (jobs.get("value") or {}).get("metrics") or {}
+            synthesis["open_job"] = {
+                "title": job_metrics.get("job_title") or job_metrics.get("job_titles"),
+                "application_deadline": job_metrics.get("application_deadline"),
+                "source": jobs.get("source_url"),
+            }
+            add_basis("company_site_jobs" if profile_evidence.get("company_site_jobs") else "workforce_jobs", "Open job information is linked to its direct source.")
 
         supporting = [
             evidence_id
@@ -574,6 +677,9 @@ def profile_to_contract(
                 "registry_live",
                 "website",
                 "financials",
+                "company_news",
+                "company_site_jobs",
+                "workforce_jobs",
             }
             and (key != "website" or verified_website)
             and (profile_evidence.get(key) or {}).get("status") == "available"
@@ -601,6 +707,21 @@ def profile_to_contract(
 
     previous_is_profile = previous_profile is not None and isinstance(previous_profile.get("evidence"), dict)
     changes = diff_profile(previous_profile, profile) if previous_is_profile else []
+    # A refresh must not resurrect raw social URLs that a newer run deliberately
+    # withholds. A previous raw profile can contain a footer or platform-owned
+    # URL even when the current website claim is otherwise safe. These are
+    # discovery artefacts, never material public-company changes.
+    changes = [
+        change
+        for change in changes
+        if not str(change.get("field") or "").startswith(
+            (
+                "website.social_links",
+                "website.discovered_social_links",
+                "website.social_link_assessments",
+            )
+        )
+    ]
 
     registry_record = (
         profile_evidence.get("registry_live")
@@ -658,6 +779,7 @@ def profile_to_contract(
         for field, record in sorted(raw_evidence.items()):
             if not isinstance(record, dict):
                 continue
+            record = _published_record(str(field), record)
             identity = {
                 "org": (source_profile or {}).get("organisation_number"),
                 "field": field,

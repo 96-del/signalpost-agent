@@ -79,6 +79,7 @@ def observation(profile: dict) -> dict | None:
         "source_class": "company_site",
         "evidence_span": f"Published {published_at}: {title}. {body_excerpt}"[:1200],
         "metrics": {
+            "article_headline": title,
             "published_at": published_at,
             "article_type": page.get("article_type"),
             "captured_dated_article_pages": len(pages),

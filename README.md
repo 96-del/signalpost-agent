@@ -102,8 +102,8 @@ uv run python scripts/run_signalpost_submission.py --organisations smoke-compani
 ```
 
 The invocation above is a 100-row smoke example. The evaluator may supply a larger
-batch; set `--expected-count` to the actual number of supplied organisations. The runner
-processes every supplied organisation and warns if the configured count differs.
+batch. The runner derives the expected count from the supplied input and processes every
+organisation; `--expected-count` is optional and only emits a warning when it differs.
 The batch path may be JSON, JSONL, plain text, or CSV as documented below.
 
 For a refresh, reuse the same `--out-dir`; before replacing its intermediate
@@ -158,13 +158,19 @@ and [OpenStreetMap copyright and licence](https://www.openstreetmap.org/copyrigh
 
 Company-site publishing is deliberately stricter than page discovery. The
 registry group response is checked for a parent root; if the homepage title or
-description identifies that parent, the site and its social links are
-quarantined for the child company. A page is emitted as company-site news only
+description identifies that parent, the site and all discovered social URLs are
+quarantined for the child company. The default runner does not publish social
+profiles: an outbound footer or platform URL is not enough to prove it belongs
+to the legal entity. A page is emitted as company-site news only
 when it is an individual dated post with explicit publication metadata and
 substantive article text. `dateModified`, generic “updated” dates, section
 labels and undated product/navigation pages do not qualify. See
 [`docs/external-connectors.md`](docs/external-connectors.md) for the evidence
-rules.
+rules. An open job is emitted only from a structured `JobPosting` on a direct
+career/job detail page of an already verified company site, with substantive
+job text and either an explicit application action or an unexpired deadline;
+generic careers indexes, expired postings and recruiter/parent-labelled
+postings do not qualify.
 
 The runner report includes an operational budget check. Defaults are 45 minutes
 and 2,000 HTTP requests per 100 supplied companies, matching evaluator guidance

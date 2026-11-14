@@ -1,10 +1,10 @@
 # Signalpost optimization and release control
 
 The [published Signalpost challenge page](https://builderr.ai/challenges/signalpost) is the scoring and
-submission source of truth. As checked on 2026-10-16, qualification requires at least 65/100 on an
-official run. The four axes are recall and coverage (50), precision and evidence (30), synthesis (12),
-and UX (8). Builderr supplies fresh company batches; local scores and precomputed profiles are not the
-official result.
+submission source of truth. As checked on 2026-11-14, qualification requires both at least 65/100 and
+at least 95% correct checked claims on an official run. The four axes are recall and coverage (50),
+precision and evidence (30), synthesis (12), and UX (8). Builderr supplies fresh company batches; local
+scores and precomputed profiles are not the official result.
 
 An evaluator clarification received on 26 October 2026 confirmed that the
 evaluator passes an organisation-number file and, when required, the frozen

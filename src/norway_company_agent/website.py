@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import urllib.robotparser
+import xml.etree.ElementTree as ET
 from datetime import date, datetime
 from queue import Queue, Empty
 from threading import Thread, local
@@ -35,10 +36,26 @@ SOCIAL_HOSTS = {
     "tiktok.com": "tiktok",
 }
 PRIORITY_TERMS = (
+    # The only non-registry activity claims we publish are direct, company-site
+    # news and jobs. Fetch those first, then retain a small identity/contact
+    # layer. The four-page ceiling remains unchanged.
+    "karriere", "career", "careers", "ledig-stilling", "ledige-stillinger",
+    "stillinger", "stilling", "jobb", "jobs", "job", "vacancy", "vacancies",
+    "news", "press", "aktuelt", "nyheter", "artikler", "blog",
     "om-oss", "om_oss", "about", "kontakt", "contact", "ledelse", "management",
     "team", "people", "locations", "lokasjoner", "avdelinger", "butikker",
-    "news", "press", "aktuelt", "nyheter",
 )
+NEWS_ROUTE_TERMS = {"news", "company-news", "press", "aktuelt", "nyheter", "artikler", "blog"}
+JOB_ROUTE_TERMS = {
+    "career", "careers", "karriere", "jobb", "jobber", "job", "jobs",
+    "stilling", "stillinger", "ledig-stilling", "ledige-stillinger", "vacancy", "vacancies",
+}
+GENERIC_DETAIL_SEGMENTS = {
+    "all", "archive", "archives", "latest", "index", "category", "tag", "feed",
+    "search", "careers", "career", "karriere", "jobs", "job", "stillinger",
+    "stilling", "ledige-stillinger", "vacancies", "vacancy", "news", "press",
+    "aktuelt", "nyheter", "artikler", "blog",
+}
 _REQUEST_LOCAL = local()
 
 
@@ -239,6 +256,134 @@ def normalize_social_url(url: str) -> dict[str, str] | None:
     return {"platform": platform, "url": f"https://{canonical_host}/{'/'.join(parts)}"}
 
 
+def _same_host_detail_links(base_url: str, soup: BeautifulSoup, *, route_terms: set[str], limit: int = 2) -> list[str]:
+    """Find a few direct same-site detail pages below a news/job section.
+
+    These are candidates only. Publication still requires the verified website
+    gate and the news/job-specific evidence checks in the extractor.
+    """
+    base = urllib.parse.urlparse(base_url)
+    found: dict[str, None] = {}
+    for anchor in soup.select("a[href]"):
+        href = str(anchor.get("href") or "").strip()
+        url = urllib.parse.urljoin(base_url, href)
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"} or parsed.netloc.casefold() != base.netloc.casefold():
+            continue
+        parts = [part.casefold() for part in parsed.path.split("/") if part]
+        section_index = next((index for index, part in enumerate(parts) if part in route_terms), None)
+        if section_index is None or section_index >= len(parts) - 1:
+            continue
+        tail = parts[section_index + 1:]
+        if not tail or all(part in GENERIC_DETAIL_SEGMENTS for part in tail):
+            continue
+        clean = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+        if clean.rstrip("/") == base_url.rstrip("/"):
+            continue
+        found[clean] = None
+        if len(found) >= limit:
+            break
+    return list(found)
+
+
+def _sitemap_detail_links(base_url: str, payload: bytes, *, route_terms: set[str], limit: int = 2) -> list[str]:
+    """Return bounded direct news/job URLs from a same-site URL-set sitemap.
+
+    Sitemap *index* files deliberately yield no links here: following arbitrary
+    child sitemaps would turn a bounded company crawl into an unbounded crawl.
+    A company must expose a direct URL-set sitemap at the conventional endpoint
+    for this fallback to add page candidates.
+    """
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError:
+        return []
+    if root.tag.rsplit("}", 1)[-1].casefold() != "urlset":
+        return []
+    base = urllib.parse.urlparse(base_url)
+    found: dict[str, None] = {}
+    for url_node in root:
+        if url_node.tag.rsplit("}", 1)[-1].casefold() != "url":
+            continue
+        location = next(
+            (
+                (child.text or "").strip()
+                for child in url_node
+                if child.tag.rsplit("}", 1)[-1].casefold() == "loc" and (child.text or "").strip()
+            ),
+            "",
+        )
+        if not location:
+            continue
+        parsed = urllib.parse.urlparse(location)
+        if parsed.scheme not in {"http", "https"} or parsed.netloc.casefold() != base.netloc.casefold():
+            continue
+        parts = [part.casefold() for part in parsed.path.split("/") if part]
+        section_index = next((index for index, part in enumerate(parts) if part in route_terms), None)
+        if section_index is None or section_index >= len(parts) - 1:
+            continue
+        tail = parts[section_index + 1:]
+        if all(part in GENERIC_DETAIL_SEGMENTS for part in tail):
+            continue
+        if parsed.path.casefold().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".pdf")):
+            continue
+        clean = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+        found[clean] = None
+        if len(found) >= limit:
+            break
+    return list(found)
+
+
+def _fetch_sitemap_detail_candidates(
+    homepage_url: str,
+    *,
+    homepage_domain: str,
+    timeout: float,
+    max_bytes: int = 1_000_000,
+) -> tuple[dict[str, list[str]], int, int, int, str | None]:
+    """Fetch one conventional sitemap endpoint and return direct page candidates.
+
+    This is deliberately a one-request fallback (plus its robots check), with
+    a short timeout. It respects the same public-network, robots and registered
+    domain rules as HTML pages and never turns a sitemap index into recursive
+    crawling.
+    """
+    base = urllib.parse.urlparse(homepage_url)
+    sitemap_url = urllib.parse.urlunparse((base.scheme, base.netloc, "/sitemap.xml", "", "", ""))
+    redirects_before = _redirect_count()
+    try:
+        assert_public_url(sitemap_url)
+        if not _robots_allowed(sitemap_url, timeout):
+            return {"news": [], "jobs": []}, 1 + _redirect_count() - redirects_before, 0, 0, "robots.txt disallows sitemap"
+    except Exception as exc:
+        return {"news": [], "jobs": []}, 1 + _redirect_count() - redirects_before, 0, 0, f"sitemap robots check failed: {type(exc).__name__}: {str(exc)[:120]}"
+    started = time.monotonic()
+    request = urllib.request.Request(sitemap_url, headers={"User-Agent": USER_AGENT, "Accept": "application/xml,text/xml,*/*;q=0.1"})
+    try:
+        with SAFE_OPENER.open(request, timeout=timeout) as response:
+            raw = response.read(max_bytes + 1)
+            elapsed = int((time.monotonic() - started) * 1000)
+            final_url = response.geturl()
+            assert_public_url(final_url)
+            if len(raw) > max_bytes:
+                return {"news": [], "jobs": []}, 2 + _redirect_count() - redirects_before, len(raw), elapsed, "sitemap exceeds byte limit"
+            if _registered_domain(final_url) != homepage_domain:
+                return {"news": [], "jobs": []}, 2 + _redirect_count() - redirects_before, len(raw), elapsed, "sitemap redirected outside registered domain"
+        return {
+            "news": _sitemap_detail_links(final_url, raw, route_terms=NEWS_ROUTE_TERMS),
+            "jobs": _sitemap_detail_links(final_url, raw, route_terms=JOB_ROUTE_TERMS),
+        }, 2 + _redirect_count() - redirects_before, len(raw), elapsed, None
+    except urllib.error.HTTPError as exc:
+        elapsed = int((time.monotonic() - started) * 1000)
+        if exc.code in {404, 410}:
+            # A conventional sitemap is optional. Its absence is not a
+            # company-site failure and should not pollute the evidence ledger.
+            return {"news": [], "jobs": []}, 2 + _redirect_count() - redirects_before, 0, elapsed, None
+        return {"news": [], "jobs": []}, 2 + _redirect_count() - redirects_before, 0, elapsed, f"sitemap HTTP {exc.code}"
+    except Exception as exc:
+        return {"news": [], "jobs": []}, 2 + _redirect_count() - redirects_before, 0, int((time.monotonic() - started) * 1000), f"sitemap fetch failed: {type(exc).__name__}: {str(exc)[:120]}"
+
+
 def _priority_links(base_url: str, soup: BeautifulSoup, limit: int = 4) -> list[str]:
     base = urllib.parse.urlparse(base_url)
     candidates: dict[str, int] = {}
@@ -290,6 +435,13 @@ def _fetch_secondary_page(url: str, *, homepage_domain: str, timeout: float, max
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),
             **extract_published_metadata(page_soup),
         }
+        page["news_detail_candidates"] = _same_host_detail_links(
+            final_url, page_soup, route_terms=NEWS_ROUTE_TERMS,
+        )
+        page["job_detail_candidates"] = _same_host_detail_links(
+            final_url, page_soup, route_terms=JOB_ROUTE_TERMS,
+        )
+        page.update(extract_job_posting_metadata(page_soup, page_text))
         return page, _social_links(final_url, page_soup), 2 + _redirect_count() - redirects_before, len(raw), elapsed, None
     except Exception as exc:
         return None, [], 2 + _redirect_count() - redirects_before, 0, int((time.monotonic() - started) * 1000), f"{type(exc).__name__}: {str(exc)[:120]}"
@@ -377,6 +529,73 @@ def extract_published_metadata(soup: BeautifulSoup) -> dict[str, str | None]:
     og_title = soup.select_one('meta[property="og:title"]')
     headline = headline or (str(og_title.get("content") or "").strip() if og_title else None)
     return {"published_at": published_at, "article_type": article_type, "article_headline": headline}
+
+
+def extract_job_posting_metadata(soup: BeautifulSoup, page_text: str) -> dict[str, Any]:
+    """Extract only direct-page job signals; never infer a posting from a menu label."""
+    posting: dict[str, Any] | None = None
+
+    def walk(node: Any) -> None:
+        nonlocal posting
+        if posting is not None:
+            return
+        if isinstance(node, dict):
+            raw_type = node.get("@type")
+            kinds = raw_type if isinstance(raw_type, list) else [raw_type]
+            if any(str(kind).rsplit("/", 1)[-1].casefold() == "jobposting" for kind in kinds):
+                posting = node
+                return
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    for script in soup.select('script[type="application/ld+json"]'):
+        try:
+            walk(json.loads(script.string or script.get_text()))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if posting is not None:
+            break
+
+    def date_value(value: Any) -> str | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).date().isoformat()
+        except ValueError:
+            try:
+                return date.fromisoformat(raw[:10]).isoformat()
+            except ValueError:
+                return None
+
+    apply_text = " ".join(
+        " ".join((str(anchor.get_text(" ", strip=True) or ""), str(anchor.get("href") or "")))
+        for anchor in soup.select("a[href], button")
+    ).casefold()
+    application_signal = bool(re.search(r"\b(apply|application|søk|sok|send\s+(?:inn\s+)?søknad|send\s+application)\b", apply_text))
+    if posting is None:
+        return {
+            "job_posting_structured": False,
+            "job_title": None,
+            "job_date_posted": None,
+            "job_valid_through": None,
+            "job_hiring_organization": None,
+            "job_application_signal": application_signal,
+        }
+    organisation = posting.get("hiringOrganization")
+    if isinstance(organisation, dict):
+        organisation = organisation.get("name")
+    return {
+        "job_posting_structured": True,
+        "job_title": str(posting.get("title") or "").strip() or None,
+        "job_date_posted": date_value(posting.get("datePosted")),
+        "job_valid_through": date_value(posting.get("validThrough")),
+        "job_hiring_organization": str(organisation or "").strip() or None,
+        "job_application_signal": application_signal,
+    }
 
 
 def _extraction_state(text: str, soup: BeautifulSoup) -> str:
@@ -469,6 +688,104 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
                 social.extend(page_social)
             elif page_error:
                 crawl_errors.append({"url": page_url, "error": page_error})
+
+        # A news or careers landing page is not itself publishable evidence.
+        # Follow at most one direct article and one direct job detail page from
+        # the already bounded same-site pages. This prevents unbounded crawling.
+        fetched_urls = {str(page.get("url") or "").rstrip("/") for page in pages}
+        for candidate_key in ("news_detail_candidates", "job_detail_candidates"):
+            candidate_url = next(
+                (
+                    str(url)
+                    for page in pages
+                    for url in (page.get(candidate_key) or [])
+                    if str(url).rstrip("/") not in fetched_urls
+                ),
+                None,
+            )
+            for page in pages:
+                page.pop(candidate_key, None)
+            if not candidate_url:
+                continue
+            page, page_social, page_requests, page_bytes, page_elapsed, page_error = _fetch_secondary_page(
+                candidate_url,
+                homepage_domain=homepage_domain,
+                timeout=timeout,
+                max_bytes=min(max_bytes, 1_000_000),
+            )
+            requests += page_requests
+            bytes_received += page_bytes
+            if page_elapsed:
+                page_latencies.append(page_elapsed)
+            if page:
+                page.pop("news_detail_candidates", None)
+                page.pop("job_detail_candidates", None)
+                pages.append(page)
+                social.extend(page_social)
+                fetched_urls.add(str(page.get("url") or "").rstrip("/"))
+            elif page_error:
+                crawl_errors.append({"url": candidate_url, "error": page_error})
+
+        def has_direct_page(route_terms: set[str], *, requires: str) -> bool:
+            for item in pages:
+                parsed = urllib.parse.urlparse(str(item.get("url") or ""))
+                parts = [part.casefold() for part in parsed.path.split("/") if part]
+                section_index = next((index for index, part in enumerate(parts) if part in route_terms), None)
+                if section_index is None or section_index >= len(parts) - 1:
+                    continue
+                if requires == "news" and item.get("published_at"):
+                    return True
+                if requires == "jobs" and item.get("job_posting_structured"):
+                    return True
+            return False
+
+        # Sites often publish detail pages in a conventional URL-set sitemap
+        # without linking them from their homepage navigation. Use one bounded
+        # sitemap request only when the HTML crawl did not already find a
+        # candidate for that evidence family.
+        missing_sitemap_families = {
+            "news": not has_direct_page(NEWS_ROUTE_TERMS, requires="news"),
+            "jobs": not has_direct_page(JOB_ROUTE_TERMS, requires="jobs"),
+        }
+        if any(missing_sitemap_families.values()):
+            sitemap_candidates, sitemap_requests, sitemap_bytes, sitemap_elapsed, sitemap_error = _fetch_sitemap_detail_candidates(
+                final_url,
+                homepage_domain=homepage_domain,
+                timeout=min(timeout, 5.0),
+            )
+            requests += sitemap_requests
+            bytes_received += sitemap_bytes
+            if sitemap_elapsed:
+                page_latencies.append(sitemap_elapsed)
+            if sitemap_error:
+                crawl_errors.append({"url": urllib.parse.urljoin(final_url, "/sitemap.xml"), "error": sitemap_error})
+            for family, candidate_key in (("news", "news_detail_candidates"), ("jobs", "job_detail_candidates")):
+                if not missing_sitemap_families[family]:
+                    continue
+                candidate_url = next(
+                    (url for url in sitemap_candidates[family] if url.rstrip("/") not in fetched_urls),
+                    None,
+                )
+                if not candidate_url:
+                    continue
+                page, page_social, page_requests, page_bytes, page_elapsed, page_error = _fetch_secondary_page(
+                    candidate_url,
+                    homepage_domain=homepage_domain,
+                    timeout=min(timeout, 8.0),
+                    max_bytes=min(max_bytes, 1_000_000),
+                )
+                requests += page_requests
+                bytes_received += page_bytes
+                if page_elapsed:
+                    page_latencies.append(page_elapsed)
+                if page:
+                    page.pop("news_detail_candidates", None)
+                    page.pop("job_detail_candidates", None)
+                    pages.append(page)
+                    social.extend(page_social)
+                    fetched_urls.add(str(page.get("url") or "").rstrip("/"))
+                elif page_error:
+                    crawl_errors.append({"url": candidate_url, "error": page_error})
         value["pages"] = pages
         value["social_links"] = list({(item["platform"], item["url"]): item for item in social}.values())
         value["crawl_errors"] = crawl_errors

@@ -103,6 +103,7 @@ class SignalpostWebsiteSpider(scrapy.Spider):
             row for row in rows
             if row.get("website") and (allowed is None or row["organisation_number"] in allowed)
         ][: int(limit) if limit else None]
+        self._scheduled_detail_kinds: set[tuple[str, str]] = set()
 
     def _initial_requests(self):
         for profile in self.profiles:
@@ -152,7 +153,28 @@ class SignalpostWebsiteSpider(scrapy.Spider):
             )
 
     def parse_secondary(self, response):
-        yield self._event(response)
+        event = self._event(response)
+        yield event
+        if event.get("status") != "available" or response.meta.get("page_kind") != "priority":
+            return
+        organisation_number = str(response.meta["organisation_number"])
+        for page_kind, key in (("news_detail", "news_detail_candidates"), ("job_detail", "job_detail_candidates")):
+            marker = (organisation_number, page_kind)
+            candidates = event.get(key) or []
+            if marker in self._scheduled_detail_kinds or not candidates:
+                continue
+            self._scheduled_detail_kinds.add(marker)
+            yield scrapy.Request(
+                str(candidates[0]),
+                callback=self.parse_secondary,
+                errback=self.errback_page,
+                meta={
+                    "organisation_number": organisation_number,
+                    "requested_url": str(candidates[0]),
+                    "page_kind": page_kind,
+                    "scheme_supplied": True,
+                },
+            )
 
     def _event(self, response):
         return extract_page_event(
